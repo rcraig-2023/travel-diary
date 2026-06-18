@@ -1,127 +1,88 @@
-import React, { useState, useEffect } from 'react';
-import { StyleSheet, View, Text, TouchableOpacity, Image, FlatList } from 'react-native';
-import * as ImagePicker from 'expo-image-picker';
-import { addPhoto, getPhotosForRestaurant } from '../db/database';
+import React, { useState } from 'react';
+import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
+import { useRoute, RouteProp } from '@react-navigation/native';
+import { Trip } from '../types';
+import PhotosTab from './city/PhotosTab';
+import JotsTab from './city/JotsTab';
+import LandmarksTab from './city/LandmarksTab';
+import RestaurantsTab from './city/RestaurantsTab';
+
+type RouteParams = { trip: Trip };
+
+const TABS = ['Photos', 'Jots', 'Landmarks', 'Restaurants'] as const;
+type Tab = typeof TABS[number];
 
 export default function CityScreen() {
-  const [photos, setPhotos] = useState<string[]>([]);
-  const dummyRestaurantId = 1; // Our seeded Paris restaurant
+  const route = useRoute<RouteProp<{ City: RouteParams }, 'City'>>();
+  const { trip } = route.params;
+  const [activeTab, setActiveTab] = useState<Tab>('Photos');
 
-  // Load photos from SQLite when the screen opens
-  useEffect(() => {
-    async function loadPhotos() {
-      const savedPhotos = await getPhotosForRestaurant(dummyRestaurantId);
-      setPhotos(savedPhotos);
-    }
-    loadPhotos();
-  }, []);
-
-  const pickImage = async () => {
-    let result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ['images'],
-      allowsEditing: true,
-      aspect: [4, 3],
-      quality: 1,
-    });
-
-    if (!result.canceled) {
-      const localUri = result.assets[0].uri;
-      setPhotos((prevPhotos) => [...prevPhotos, localUri]);
-      await addPhoto(dummyRestaurantId, localUri);
-    }
+  const formatDate = (iso: string | null) => {
+    if (!iso) return '';
+    return new Date(iso).toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
   };
 
   return (
     <View style={styles.container}>
       <View style={styles.header}>
-        <Text style={styles.title}>Paris</Text>
-        <Text style={styles.subtitle}>Winter 2026</Text>
+        <Text style={styles.title}>{trip.city_name}</Text>
+        <Text style={styles.subtitle}>
+          {trip.country ? `${trip.country}${trip.visit_date ? '  ·  ' : ''}` : ''}
+          {formatDate(trip.visit_date)}
+        </Text>
       </View>
 
-      {/* Adding flex: 1 directly to the FlatList forces it to fill the middle 
-        of the screen and cleanly pushes the button container to the bottom.
-      */}
-      <FlatList
-        style={{ flex: 1 }}
-        data={photos}
-        keyExtractor={(item, index) => index.toString()}
-        numColumns={2}
-        contentContainerStyle={styles.gallery}
-        renderItem={({ item }) => (
-          <Image source={{ uri: item }} style={styles.photo} />
-        )}
-        ListEmptyComponent={
-          <Text style={styles.emptyText}>No photos yet. Add your favorite meals and spots!</Text>
-        }
-      />
+      <View style={styles.tabBar}>
+        {TABS.map((tab) => (
+          <TouchableOpacity
+            key={tab}
+            style={[styles.tab, activeTab === tab && styles.tabActive]}
+            onPress={() => setActiveTab(tab)}
+          >
+            <Text style={[styles.tabText, activeTab === tab && styles.tabTextActive]}>
+              {tab}
+            </Text>
+          </TouchableOpacity>
+        ))}
+      </View>
 
-      {/* This container sits solidly at the bottom of the document flow */}
-      <View style={styles.bottomDock}>
-        <TouchableOpacity style={styles.addButton} onPress={pickImage}>
-          <Text style={styles.addButtonText}>+ Add Photo</Text>
-        </TouchableOpacity>
+      <View style={styles.content}>
+        {activeTab === 'Photos' && <PhotosTab tripId={trip.id} />}
+        {activeTab === 'Jots' && <JotsTab tripId={trip.id} />}
+        {activeTab === 'Landmarks' && <LandmarksTab tripId={trip.id} />}
+        {activeTab === 'Restaurants' && <RestaurantsTab tripId={trip.id} />}
       </View>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#fff',
-  },
+  container: { flex: 1, backgroundColor: '#fff' },
   header: {
-    padding: 20,
-    borderBottomWidth: 1,
-    borderBottomColor: '#eee',
-  },
-  title: {
-    fontSize: 28,
-    fontWeight: 'bold',
-  },
-  subtitle: {
-    fontSize: 16,
-    color: '#666',
-    marginTop: 4,
-  },
-  gallery: {
-    padding: 10,
-  },
-  photo: {
-    flex: 1,
-    aspectRatio: 1,
-    margin: 5,
-    borderRadius: 10,
-    backgroundColor: '#f0f0f0',
-  },
-  emptyText: {
-    textAlign: 'center',
-    color: '#999',
-    marginTop: 40,
-    fontSize: 16,
-  },
-  bottomDock: {
     paddingHorizontal: 20,
-    paddingTop: 15,
-    paddingBottom: 40, // Gives generous clearance for the iPhone home bar
+    paddingTop: 16,
+    paddingBottom: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f0f0f0',
+  },
+  title: { fontSize: 26, fontWeight: 'bold', color: '#111' },
+  subtitle: { fontSize: 14, color: '#888', marginTop: 3 },
+  tabBar: {
+    flexDirection: 'row',
+    borderBottomWidth: 1,
+    borderBottomColor: '#f0f0f0',
     backgroundColor: '#fff',
-    borderTopWidth: 1,
-    borderTopColor: '#f0f0f0',
   },
-  addButton: {
-    backgroundColor: '#000',
-    paddingVertical: 18,
-    borderRadius: 30,
+  tab: {
+    flex: 1,
+    paddingVertical: 12,
     alignItems: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.2,
-    shadowRadius: 5,
-    elevation: 5,
   },
-  addButtonText: {
-    color: '#fff',
-    fontSize: 18,
-    fontWeight: 'bold',
+  tabActive: {
+    borderBottomWidth: 2,
+    borderBottomColor: '#000',
   },
+  tabText: { fontSize: 13, color: '#aaa', fontWeight: '500' },
+  tabTextActive: { color: '#000', fontWeight: '700' },
+  content: { flex: 1 },
 });
