@@ -1,0 +1,1783 @@
+From cfc67a206ef4957550e3afd206f70ede3a6aac7c Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 18 Jun 2026 19:12:51 +0000
+Subject: [PATCH] Build core travel diary app with Supabase, auth, and Gemini
+ photo tagging
+
+- Add Supabase client, auth context, and secure token storage
+- Add email/password auth screen
+- Replace hardcoded map pins with real user trips from Supabase
+- Add city search via Nominatim (free, no API key) for logging new trips
+- Rebuild CityScreen with 4 tabs: Photos, Jots, Landmarks, Restaurants
+- Upload photos to Supabase Storage; analyze with Gemini 1.5 Flash
+- Auto-suggest detected landmarks/restaurants from photo AI analysis
+- Add jots (timestamped free-form notes) with swipe-to-delete
+- Add landmarks list with visited toggle and AI-detected badge
+- Add restaurants list with star rating and notes
+- Include supabase-schema.sql and .env.example for setup
+
+Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01CTWrbTo3FGvrPEBjrnSf3t
+---
+ .env.example                        |   3 +
+ App.tsx                             |  56 ++++--
+ src/context/AuthContext.tsx         |  47 +++++
+ src/lib/gemini.ts                   |  41 ++++
+ src/lib/supabase.ts                 |  21 ++
+ src/screens/AuthScreen.tsx          | 106 ++++++++++
+ src/screens/CityScreen.tsx          | 163 ++++++----------
+ src/screens/HomeScreen.tsx          | 291 +++++++++++++++++++---------
+ src/screens/city/JotsTab.tsx        | 144 ++++++++++++++
+ src/screens/city/LandmarksTab.tsx   | 149 ++++++++++++++
+ src/screens/city/PhotosTab.tsx      | 208 ++++++++++++++++++++
+ src/screens/city/RestaurantsTab.tsx | 204 +++++++++++++++++++
+ src/types/index.ts                  |  56 ++++++
+ supabase-schema.sql                 |  88 +++++++++
+ 14 files changed, 1362 insertions(+), 215 deletions(-)
+ create mode 100644 .env.example
+ create mode 100644 src/context/AuthContext.tsx
+ create mode 100644 src/lib/gemini.ts
+ create mode 100644 src/lib/supabase.ts
+ create mode 100644 src/screens/AuthScreen.tsx
+ create mode 100644 src/screens/city/JotsTab.tsx
+ create mode 100644 src/screens/city/LandmarksTab.tsx
+ create mode 100644 src/screens/city/PhotosTab.tsx
+ create mode 100644 src/screens/city/RestaurantsTab.tsx
+ create mode 100644 src/types/index.ts
+ create mode 100644 supabase-schema.sql
+
+diff --git a/.env.example b/.env.example
+new file mode 100644
+index 0000000..29d5c78
+--- /dev/null
++++ b/.env.example
+@@ -0,0 +1,3 @@
++EXPO_PUBLIC_SUPABASE_URL=https://your-project-id.supabase.co
++EXPO_PUBLIC_SUPABASE_ANON_KEY=your-anon-key-here
++EXPO_PUBLIC_GEMINI_API_KEY=your-gemini-api-key-here
+diff --git a/App.tsx b/App.tsx
+index 7e17c02..62b3f35 100644
+--- a/App.tsx
++++ b/App.tsx
+@@ -1,36 +1,52 @@
+-import { useEffect } from 'react';
++import 'react-native-url-polyfill/auto';
+ import { NavigationContainer } from '@react-navigation/native';
+ import { createNativeStackNavigator } from '@react-navigation/native-stack';
+-import { Text, View } from 'react-native';
++import { ActivityIndicator, View } from 'react-native';
+ 
++import { AuthProvider, useAuth } from './src/context/AuthContext';
++import AuthScreen from './src/screens/AuthScreen';
+ import HomeScreen from './src/screens/HomeScreen';
+-import { initDB } from './src/db/database';
+-
+-// We will keep CityScreen as a placeholder for now
+-function CityScreen() {
+-  return (
+-    <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
+-      <Text style={{ fontSize: 20, fontWeight: 'bold' }}>City Pins & Restaurants</Text>
+-    </View>
+-  );
+-}
++import CityScreen from './src/screens/CityScreen';
+ 
+ const Stack = createNativeStackNavigator();
+ 
+-export default function App() {
++function AppNavigator() {
++  const { session, loading } = useAuth();
++
++  if (loading) {
++    return (
++      <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
++        <ActivityIndicator size="large" color="#000" />
++      </View>
++    );
++  }
++
++  if (!session) {
++    return <AuthScreen />;
++  }
++
+   return (
+     <NavigationContainer>
+       <Stack.Navigator initialRouteName="Home">
+-        <Stack.Screen 
+-          name="Home" 
+-          component={HomeScreen} 
+-          options={{ title: 'My Travels' }} 
++        <Stack.Screen
++          name="Home"
++          component={HomeScreen}
++          options={{ title: 'My Travels' }}
+         />
+-        <Stack.Screen 
+-          name="City" 
+-          component={CityScreen} 
++        <Stack.Screen
++          name="City"
++          component={CityScreen}
++          options={({ route }: any) => ({ title: route.params?.trip?.city_name ?? 'Trip' })}
+         />
+       </Stack.Navigator>
+     </NavigationContainer>
+   );
+ }
++
++export default function App() {
++  return (
++    <AuthProvider>
++      <AppNavigator />
++    </AuthProvider>
++  );
++}
+diff --git a/src/context/AuthContext.tsx b/src/context/AuthContext.tsx
+new file mode 100644
+index 0000000..1405708
+--- /dev/null
++++ b/src/context/AuthContext.tsx
+@@ -0,0 +1,47 @@
++import React, { createContext, useContext, useEffect, useState } from 'react';
++import { Session, User } from '@supabase/supabase-js';
++import { supabase } from '../lib/supabase';
++
++type AuthContextType = {
++  session: Session | null;
++  user: User | null;
++  loading: boolean;
++  signOut: () => Promise<void>;
++};
++
++const AuthContext = createContext<AuthContextType>({
++  session: null,
++  user: null,
++  loading: true,
++  signOut: async () => {},
++});
++
++export function AuthProvider({ children }: { children: React.ReactNode }) {
++  const [session, setSession] = useState<Session | null>(null);
++  const [loading, setLoading] = useState(true);
++
++  useEffect(() => {
++    supabase.auth.getSession().then(({ data: { session } }) => {
++      setSession(session);
++      setLoading(false);
++    });
++
++    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
++      setSession(session);
++    });
++
++    return () => subscription.unsubscribe();
++  }, []);
++
++  const signOut = async () => {
++    await supabase.auth.signOut();
++  };
++
++  return (
++    <AuthContext.Provider value={{ session, user: session?.user ?? null, loading, signOut }}>
++      {children}
++    </AuthContext.Provider>
++  );
++}
++
++export const useAuth = () => useContext(AuthContext);
+diff --git a/src/lib/gemini.ts b/src/lib/gemini.ts
+new file mode 100644
+index 0000000..7ba3896
+--- /dev/null
++++ b/src/lib/gemini.ts
+@@ -0,0 +1,41 @@
++import { AiTags } from '../types';
++
++const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${process.env.EXPO_PUBLIC_GEMINI_API_KEY}`;
++
++const PROMPT = `Analyze this travel photo. Return ONLY valid JSON with exactly this shape:
++{"landmarks":[],"restaurants":[],"tags":[]}
++- landmarks: recognizable landmarks, monuments, or notable places visible (empty array if none)
++- restaurants: restaurant or cafe names visible on signage (empty array if none)
++- tags: descriptive tags like "architecture","street food","nature","beach","museum","market" etc.
++No markdown, no explanation — raw JSON only.`;
++
++export async function analyzePhoto(base64Image: string): Promise<AiTags> {
++  try {
++    const response = await fetch(GEMINI_URL, {
++      method: 'POST',
++      headers: { 'Content-Type': 'application/json' },
++      body: JSON.stringify({
++        contents: [{
++          parts: [
++            { text: PROMPT },
++            { inline_data: { mime_type: 'image/jpeg', data: base64Image } },
++          ],
++        }],
++        generationConfig: { temperature: 0.1 },
++      }),
++    });
++
++    if (!response.ok) return emptyTags();
++
++    const data = await response.json();
++    const text: string = data.candidates?.[0]?.content?.parts?.[0]?.text ?? '{}';
++    const cleaned = text.replace(/```json\n?|\n?```/g, '').trim();
++    return { ...emptyTags(), ...JSON.parse(cleaned) };
++  } catch {
++    return emptyTags();
++  }
++}
++
++function emptyTags(): AiTags {
++  return { landmarks: [], restaurants: [], tags: [] };
++}
+diff --git a/src/lib/supabase.ts b/src/lib/supabase.ts
+new file mode 100644
+index 0000000..641684a
+--- /dev/null
++++ b/src/lib/supabase.ts
+@@ -0,0 +1,21 @@
++import 'react-native-url-polyfill/auto';
++import { createClient } from '@supabase/supabase-js';
++import * as SecureStore from 'expo-secure-store';
++
++const ExpoSecureStoreAdapter = {
++  getItem: (key: string) => SecureStore.getItemAsync(key),
++  setItem: (key: string, value: string) => SecureStore.setItemAsync(key, value),
++  removeItem: (key: string) => SecureStore.deleteItemAsync(key),
++};
++
++const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL!;
++const supabaseAnonKey = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY!;
++
++export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
++  auth: {
++    storage: ExpoSecureStoreAdapter,
++    autoRefreshToken: true,
++    persistSession: true,
++    detectSessionInUrl: false,
++  },
++});
+diff --git a/src/screens/AuthScreen.tsx b/src/screens/AuthScreen.tsx
+new file mode 100644
+index 0000000..227a884
+--- /dev/null
++++ b/src/screens/AuthScreen.tsx
+@@ -0,0 +1,106 @@
++import React, { useState } from 'react';
++import {
++  View, Text, TextInput, TouchableOpacity, StyleSheet,
++  KeyboardAvoidingView, Platform, ActivityIndicator, Alert,
++} from 'react-native';
++import { supabase } from '../lib/supabase';
++
++export default function AuthScreen() {
++  const [email, setEmail] = useState('');
++  const [password, setPassword] = useState('');
++  const [mode, setMode] = useState<'signin' | 'signup'>('signin');
++  const [loading, setLoading] = useState(false);
++
++  const handleAuth = async () => {
++    if (!email.trim() || !password.trim()) {
++      Alert.alert('Please enter your email and password.');
++      return;
++    }
++    setLoading(true);
++    const { error } =
++      mode === 'signin'
++        ? await supabase.auth.signInWithPassword({ email, password })
++        : await supabase.auth.signUp({ email, password });
++    setLoading(false);
++    if (error) {
++      Alert.alert('Error', error.message);
++    } else if (mode === 'signup') {
++      Alert.alert('Almost there!', 'Check your email to confirm your account, then sign in.');
++    }
++  };
++
++  return (
++    <KeyboardAvoidingView
++      style={styles.container}
++      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
++    >
++      <View style={styles.inner}>
++        <Text style={styles.logo}>✈ Travel Diary</Text>
++        <Text style={styles.tagline}>Your trips, beautifully remembered.</Text>
++
++        <TextInput
++          style={styles.input}
++          placeholder="Email"
++          placeholderTextColor="#999"
++          autoCapitalize="none"
++          keyboardType="email-address"
++          value={email}
++          onChangeText={setEmail}
++        />
++        <TextInput
++          style={styles.input}
++          placeholder="Password"
++          placeholderTextColor="#999"
++          secureTextEntry
++          value={password}
++          onChangeText={setPassword}
++        />
++
++        <TouchableOpacity style={styles.button} onPress={handleAuth} disabled={loading}>
++          {loading ? (
++            <ActivityIndicator color="#fff" />
++          ) : (
++            <Text style={styles.buttonText}>
++              {mode === 'signin' ? 'Sign In' : 'Create Account'}
++            </Text>
++          )}
++        </TouchableOpacity>
++
++        <TouchableOpacity onPress={() => setMode(mode === 'signin' ? 'signup' : 'signin')}>
++          <Text style={styles.toggleText}>
++            {mode === 'signin'
++              ? "Don't have an account? Sign up"
++              : 'Already have an account? Sign in'}
++          </Text>
++        </TouchableOpacity>
++      </View>
++    </KeyboardAvoidingView>
++  );
++}
++
++const styles = StyleSheet.create({
++  container: { flex: 1, backgroundColor: '#fff' },
++  inner: { flex: 1, justifyContent: 'center', paddingHorizontal: 30 },
++  logo: { fontSize: 34, fontWeight: 'bold', textAlign: 'center', marginBottom: 8 },
++  tagline: { fontSize: 16, color: '#666', textAlign: 'center', marginBottom: 48 },
++  input: {
++    borderWidth: 1,
++    borderColor: '#ddd',
++    borderRadius: 12,
++    paddingVertical: 14,
++    paddingHorizontal: 16,
++    fontSize: 16,
++    marginBottom: 14,
++    color: '#000',
++  },
++  button: {
++    backgroundColor: '#000',
++    paddingVertical: 16,
++    borderRadius: 30,
++    alignItems: 'center',
++    marginTop: 4,
++    marginBottom: 16,
++  },
++  buttonText: { color: '#fff', fontSize: 16, fontWeight: 'bold' },
++  toggleText: { textAlign: 'center', color: '#666', fontSize: 14 },
++});
+diff --git a/src/screens/CityScreen.tsx b/src/screens/CityScreen.tsx
+index 813e5f7..26de688 100644
+--- a/src/screens/CityScreen.tsx
++++ b/src/screens/CityScreen.tsx
+@@ -1,127 +1,88 @@
+-import React, { useState, useEffect } from 'react';
+-import { StyleSheet, View, Text, TouchableOpacity, Image, FlatList } from 'react-native';
+-import * as ImagePicker from 'expo-image-picker';
+-import { addPhoto, getPhotosForRestaurant } from '../db/database';
++import React, { useState } from 'react';
++import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
++import { useRoute, RouteProp } from '@react-navigation/native';
++import { Trip } from '../types';
++import PhotosTab from './city/PhotosTab';
++import JotsTab from './city/JotsTab';
++import LandmarksTab from './city/LandmarksTab';
++import RestaurantsTab from './city/RestaurantsTab';
+ 
+-export default function CityScreen() {
+-  const [photos, setPhotos] = useState<string[]>([]);
+-  const dummyRestaurantId = 1; // Our seeded Paris restaurant
++type RouteParams = { trip: Trip };
+ 
+-  // Load photos from SQLite when the screen opens
+-  useEffect(() => {
+-    async function loadPhotos() {
+-      const savedPhotos = await getPhotosForRestaurant(dummyRestaurantId);
+-      setPhotos(savedPhotos);
+-    }
+-    loadPhotos();
+-  }, []);
++const TABS = ['Photos', 'Jots', 'Landmarks', 'Restaurants'] as const;
++type Tab = typeof TABS[number];
+ 
+-  const pickImage = async () => {
+-    let result = await ImagePicker.launchImageLibraryAsync({
+-      mediaTypes: ['images'],
+-      allowsEditing: true,
+-      aspect: [4, 3],
+-      quality: 1,
+-    });
++export default function CityScreen() {
++  const route = useRoute<RouteProp<{ City: RouteParams }, 'City'>>();
++  const { trip } = route.params;
++  const [activeTab, setActiveTab] = useState<Tab>('Photos');
+ 
+-    if (!result.canceled) {
+-      const localUri = result.assets[0].uri;
+-      setPhotos((prevPhotos) => [...prevPhotos, localUri]);
+-      await addPhoto(dummyRestaurantId, localUri);
+-    }
++  const formatDate = (iso: string | null) => {
++    if (!iso) return '';
++    return new Date(iso).toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
+   };
+ 
+   return (
+     <View style={styles.container}>
+       <View style={styles.header}>
+-        <Text style={styles.title}>Paris</Text>
+-        <Text style={styles.subtitle}>Winter 2026</Text>
++        <Text style={styles.title}>{trip.city_name}</Text>
++        <Text style={styles.subtitle}>
++          {trip.country ? `${trip.country}${trip.visit_date ? '  ·  ' : ''}` : ''}
++          {formatDate(trip.visit_date)}
++        </Text>
+       </View>
+ 
+-      {/* Adding flex: 1 directly to the FlatList forces it to fill the middle 
+-        of the screen and cleanly pushes the button container to the bottom.
+-      */}
+-      <FlatList
+-        style={{ flex: 1 }}
+-        data={photos}
+-        keyExtractor={(item, index) => index.toString()}
+-        numColumns={2}
+-        contentContainerStyle={styles.gallery}
+-        renderItem={({ item }) => (
+-          <Image source={{ uri: item }} style={styles.photo} />
+-        )}
+-        ListEmptyComponent={
+-          <Text style={styles.emptyText}>No photos yet. Add your favorite meals and spots!</Text>
+-        }
+-      />
++      <View style={styles.tabBar}>
++        {TABS.map((tab) => (
++          <TouchableOpacity
++            key={tab}
++            style={[styles.tab, activeTab === tab && styles.tabActive]}
++            onPress={() => setActiveTab(tab)}
++          >
++            <Text style={[styles.tabText, activeTab === tab && styles.tabTextActive]}>
++              {tab}
++            </Text>
++          </TouchableOpacity>
++        ))}
++      </View>
+ 
+-      {/* This container sits solidly at the bottom of the document flow */}
+-      <View style={styles.bottomDock}>
+-        <TouchableOpacity style={styles.addButton} onPress={pickImage}>
+-          <Text style={styles.addButtonText}>+ Add Photo</Text>
+-        </TouchableOpacity>
++      <View style={styles.content}>
++        {activeTab === 'Photos' && <PhotosTab tripId={trip.id} />}
++        {activeTab === 'Jots' && <JotsTab tripId={trip.id} />}
++        {activeTab === 'Landmarks' && <LandmarksTab tripId={trip.id} />}
++        {activeTab === 'Restaurants' && <RestaurantsTab tripId={trip.id} />}
+       </View>
+     </View>
+   );
+ }
+ 
+ const styles = StyleSheet.create({
+-  container: {
+-    flex: 1,
+-    backgroundColor: '#fff',
+-  },
++  container: { flex: 1, backgroundColor: '#fff' },
+   header: {
+-    padding: 20,
++    paddingHorizontal: 20,
++    paddingTop: 16,
++    paddingBottom: 12,
+     borderBottomWidth: 1,
+-    borderBottomColor: '#eee',
+-  },
+-  title: {
+-    fontSize: 28,
+-    fontWeight: 'bold',
++    borderBottomColor: '#f0f0f0',
+   },
+-  subtitle: {
+-    fontSize: 16,
+-    color: '#666',
+-    marginTop: 4,
+-  },
+-  gallery: {
+-    padding: 10,
+-  },
+-  photo: {
+-    flex: 1,
+-    aspectRatio: 1,
+-    margin: 5,
+-    borderRadius: 10,
+-    backgroundColor: '#f0f0f0',
+-  },
+-  emptyText: {
+-    textAlign: 'center',
+-    color: '#999',
+-    marginTop: 40,
+-    fontSize: 16,
+-  },
+-  bottomDock: {
+-    paddingHorizontal: 20,
+-    paddingTop: 15,
+-    paddingBottom: 40, // Gives generous clearance for the iPhone home bar
++  title: { fontSize: 26, fontWeight: 'bold', color: '#111' },
++  subtitle: { fontSize: 14, color: '#888', marginTop: 3 },
++  tabBar: {
++    flexDirection: 'row',
++    borderBottomWidth: 1,
++    borderBottomColor: '#f0f0f0',
+     backgroundColor: '#fff',
+-    borderTopWidth: 1,
+-    borderTopColor: '#f0f0f0',
+   },
+-  addButton: {
+-    backgroundColor: '#000',
+-    paddingVertical: 18,
+-    borderRadius: 30,
++  tab: {
++    flex: 1,
++    paddingVertical: 12,
+     alignItems: 'center',
+-    shadowColor: '#000',
+-    shadowOffset: { width: 0, height: 4 },
+-    shadowOpacity: 0.2,
+-    shadowRadius: 5,
+-    elevation: 5,
+   },
+-  addButtonText: {
+-    color: '#fff',
+-    fontSize: 18,
+-    fontWeight: 'bold',
++  tabActive: {
++    borderBottomWidth: 2,
++    borderBottomColor: '#000',
+   },
+-});
+\ No newline at end of file
++  tabText: { fontSize: 13, color: '#aaa', fontWeight: '500' },
++  tabTextActive: { color: '#000', fontWeight: '700' },
++  content: { flex: 1 },
++});
+diff --git a/src/screens/HomeScreen.tsx b/src/screens/HomeScreen.tsx
+index 4520c24..ccd7b9b 100644
+--- a/src/screens/HomeScreen.tsx
++++ b/src/screens/HomeScreen.tsx
+@@ -1,124 +1,227 @@
+-import React from 'react';
+-import { StyleSheet, View, Text, TextInput, TouchableOpacity } from 'react-native';
++import React, { useState, useEffect, useCallback, useRef } from 'react';
++import {
++  StyleSheet, View, Text, TextInput, TouchableOpacity,
++  Modal, FlatList, ActivityIndicator, Alert,
++} from 'react-native';
+ import MapView, { Marker } from 'react-native-maps';
+ import { useNavigation } from '@react-navigation/native';
++import { supabase } from '../lib/supabase';
++import { useAuth } from '../context/AuthContext';
++import { Trip } from '../types';
++
++type NominatimResult = {
++  place_id: number;
++  display_name: string;
++  lat: string;
++  lon: string;
++  address: {
++    city?: string;
++    town?: string;
++    village?: string;
++    country?: string;
++  };
++};
+ 
+ export default function HomeScreen() {
+-  // Initialize navigation so we can route to the City screen
+   const navigation = useNavigation<any>();
++  const { user } = useAuth();
++  const [trips, setTrips] = useState<Trip[]>([]);
++  const [searchQuery, setSearchQuery] = useState('');
++  const [showLogModal, setShowLogModal] = useState(false);
++  const [citySearch, setCitySearch] = useState('');
++  const [cityResults, setCityResults] = useState<NominatimResult[]>([]);
++  const [searchLoading, setSearchLoading] = useState(false);
++  const [creatingTrip, setCreatingTrip] = useState(false);
++  const debounceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
++
++  useEffect(() => {
++    fetchTrips();
++  }, []);
++
++  const fetchTrips = async () => {
++    const { data, error } = await supabase
++      .from('trips')
++      .select('*')
++      .order('created_at', { ascending: false });
++    if (!error && data) setTrips(data as Trip[]);
++  };
++
++  const searchCities = useCallback(async (query: string) => {
++    if (query.length < 2) { setCityResults([]); return; }
++    setSearchLoading(true);
++    try {
++      const res = await fetch(
++        `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=json&limit=6&addressdetails=1`,
++        { headers: { 'User-Agent': 'TravelDiaryApp/1.0' } }
++      );
++      const data: NominatimResult[] = await res.json();
++      setCityResults(data);
++    } catch {
++      setCityResults([]);
++    }
++    setSearchLoading(false);
++  }, []);
++
++  useEffect(() => {
++    if (debounceTimer.current) clearTimeout(debounceTimer.current);
++    debounceTimer.current = setTimeout(() => searchCities(citySearch), 400);
++    return () => { if (debounceTimer.current) clearTimeout(debounceTimer.current); };
++  }, [citySearch, searchCities]);
++
++  const logTrip = async (result: NominatimResult) => {
++    const cityName =
++      result.address.city ||
++      result.address.town ||
++      result.address.village ||
++      result.display_name.split(',')[0].trim();
++
++    setCreatingTrip(true);
++    const { data, error } = await supabase
++      .from('trips')
++      .insert({
++        user_id: user!.id,
++        city_name: cityName,
++        country: result.address.country ?? null,
++        lat: parseFloat(result.lat),
++        lng: parseFloat(result.lon),
++        visit_date: new Date().toISOString().split('T')[0],
++      })
++      .select()
++      .single();
++    setCreatingTrip(false);
++
++    if (error) { Alert.alert('Error', error.message); return; }
++
++    closeModal();
++    fetchTrips();
++    navigation.navigate('City', { trip: data });
++  };
++
++  const closeModal = () => {
++    setShowLogModal(false);
++    setCitySearch('');
++    setCityResults([]);
++  };
++
++  const filteredTrips = trips.filter((t) =>
++    t.city_name.toLowerCase().includes(searchQuery.toLowerCase())
++  );
+ 
+   return (
+     <View style={styles.container}>
+-      {/* StyleSheet.absoluteFillObject forces the map to the absolute edges.
+-        minZoomLevel prevents the user from pinching out into the gray grid void.
+-      */}
+-      <MapView 
++      <MapView
+         style={StyleSheet.absoluteFillObject}
+-        minZoomLevel={3} 
+-        initialRegion={{
+-          latitude: 40.0000,      // Centered lower so we see more landmass
+-          longitude: -30.0000,    
+-          latitudeDelta: 45.0,    // Reduced from 70 to keep tiles filling the screen
+-          longitudeDelta: 45.0,
+-        }}
++        minZoomLevel={2}
++        initialRegion={{ latitude: 20, longitude: 0, latitudeDelta: 100, longitudeDelta: 100 }}
+       >
+-        {/* Domestic Pins */}
+-        <Marker
+-          coordinate={{ latitude: 40.7128, longitude: -74.0060 }}
+-          title="New York"
+-          description="Great sushi and matcha lattes"
+-          pinColor="#FF5A5F"
+-        />
+-        <Marker
+-          coordinate={{ latitude: 41.3111, longitude: -72.9267 }}
+-          title="New Haven"
+-          description="Day trip & campus tour"
+-          pinColor="#FF5A5F"
+-        />
+-
+-        {/* International Pins */}
+-        <Marker
+-          coordinate={{ latitude: 48.8566, longitude: 2.3522 }}
+-          title="Paris"
+-          description="Winter 2026 - Eiffel Tower views"
+-          pinColor="#00A699"
+-          // This routes the user to the City Screen when the bubble is tapped!
+-          onCalloutPress={() => navigation.navigate('City')}
+-        />
+-        <Marker
+-          coordinate={{ latitude: 52.5200, longitude: 13.4050 }}
+-          title="Berlin"
+-          description="Family travels"
+-          pinColor="#00A699"
+-        />
+-        <Marker
+-          coordinate={{ latitude: 50.0755, longitude: 14.4378 }}
+-          title="Prague"
+-          description="Summer trip"
+-          pinColor="#00A699"
+-        />
++        {filteredTrips.map((trip) => (
++          <Marker
++            key={trip.id}
++            coordinate={{ latitude: trip.lat, longitude: trip.lng }}
++            title={trip.city_name}
++            description={trip.country ?? ''}
++            pinColor={trip.country === 'United States' ? '#FF5A5F' : '#00A699'}
++            onCalloutPress={() => navigation.navigate('City', { trip })}
++          />
++        ))}
+       </MapView>
+ 
+-      {/* Top Search Bar Overlay */}
+       <View style={styles.topContainer}>
+-        <TextInput 
++        <TextInput
+           style={styles.searchBar}
+-          placeholder="Search your pins (e.g. 'Paris' or 'Texas')"
++          placeholder="Search your trips..."
+           placeholderTextColor="#666"
++          value={searchQuery}
++          onChangeText={setSearchQuery}
+         />
+       </View>
+ 
+-      {/* Floating Action Button */}
+-      <TouchableOpacity 
+-        style={styles.floatingButton}
+-        activeOpacity={0.8}
+-        onPress={() => console.log("Add Trip tapped!")}
+-      >
++      <TouchableOpacity style={styles.floatingButton} activeOpacity={0.85} onPress={() => setShowLogModal(true)}>
+         <Text style={styles.buttonText}>+ Log Trip</Text>
+       </TouchableOpacity>
++
++      <Modal visible={showLogModal} animationType="slide" presentationStyle="pageSheet">
++        <View style={styles.modal}>
++          <View style={styles.modalHeader}>
++            <Text style={styles.modalTitle}>Where did you go?</Text>
++            <TouchableOpacity onPress={closeModal}>
++              <Text style={styles.cancelText}>Cancel</Text>
++            </TouchableOpacity>
++          </View>
++
++          <TextInput
++            style={styles.cityInput}
++            placeholder="Search a city or town..."
++            placeholderTextColor="#999"
++            value={citySearch}
++            onChangeText={setCitySearch}
++            autoFocus
++          />
++
++          {(searchLoading || creatingTrip) && (
++            <ActivityIndicator style={styles.spinner} color="#000" />
++          )}
++
++          <FlatList
++            data={cityResults}
++            keyExtractor={(item) => item.place_id.toString()}
++            keyboardShouldPersistTaps="handled"
++            renderItem={({ item }) => (
++              <TouchableOpacity
++                style={styles.cityResult}
++                onPress={() => logTrip(item)}
++                disabled={creatingTrip}
++              >
++                <Text style={styles.cityResultName}>
++                  {item.address.city || item.address.town || item.address.village || item.display_name.split(',')[0]}
++                </Text>
++                <Text style={styles.cityResultSub} numberOfLines={1}>{item.display_name}</Text>
++              </TouchableOpacity>
++            )}
++            ListEmptyComponent={
++              citySearch.length >= 2 && !searchLoading
++                ? <Text style={styles.noResults}>No results found.</Text>
++                : null
++            }
++          />
++        </View>
++      </Modal>
+     </View>
+   );
+ }
+ 
+ const styles = StyleSheet.create({
+-  container: {
+-    flex: 1,
+-  },
+-  topContainer: {
+-    position: 'absolute',
+-    top: 60,
+-    width: '100%',
+-    paddingHorizontal: 20,
+-  },
++  container: { flex: 1 },
++  topContainer: { position: 'absolute', top: 60, width: '100%', paddingHorizontal: 20 },
+   searchBar: {
+-    backgroundColor: '#fff',
+-    paddingVertical: 12,
+-    paddingHorizontal: 20,
+-    borderRadius: 25,
+-    fontSize: 16,
+-    shadowColor: '#000',
+-    shadowOffset: { width: 0, height: 2 },
+-    shadowOpacity: 0.15,
+-    shadowRadius: 10,
+-    elevation: 5,
++    backgroundColor: '#fff', paddingVertical: 12, paddingHorizontal: 20,
++    borderRadius: 25, fontSize: 16,
++    shadowColor: '#000', shadowOffset: { width: 0, height: 2 },
++    shadowOpacity: 0.15, shadowRadius: 10, elevation: 5,
+   },
+   floatingButton: {
+-    position: 'absolute',
+-    bottom: 50,
+-    alignSelf: 'center',
+-    backgroundColor: '#000',
+-    paddingVertical: 16,
+-    paddingHorizontal: 32,
++    position: 'absolute', bottom: 50, alignSelf: 'center',
++    backgroundColor: '#000', paddingVertical: 16, paddingHorizontal: 32,
+     borderRadius: 30,
+-    shadowColor: '#000',
+-    shadowOffset: { width: 0, height: 4 },
+-    shadowOpacity: 0.3,
+-    shadowRadius: 6,
+-    elevation: 8,
++    shadowColor: '#000', shadowOffset: { width: 0, height: 4 },
++    shadowOpacity: 0.3, shadowRadius: 6, elevation: 8,
++  },
++  buttonText: { color: '#fff', fontSize: 16, fontWeight: 'bold' },
++  modal: { flex: 1, backgroundColor: '#fff', paddingTop: 20 },
++  modalHeader: {
++    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
++    paddingHorizontal: 20, marginBottom: 16,
++  },
++  modalTitle: { fontSize: 20, fontWeight: 'bold' },
++  cancelText: { fontSize: 16, color: '#666' },
++  cityInput: {
++    marginHorizontal: 20, borderWidth: 1, borderColor: '#ddd',
++    borderRadius: 12, paddingVertical: 12, paddingHorizontal: 16,
++    fontSize: 16, marginBottom: 8,
+   },
+-  buttonText: {
+-    color: '#fff',
+-    fontSize: 16,
+-    fontWeight: 'bold',
+-  }
+-});
+\ No newline at end of file
++  spinner: { marginTop: 20 },
++  cityResult: { paddingVertical: 14, paddingHorizontal: 20, borderBottomWidth: 1, borderBottomColor: '#f0f0f0' },
++  cityResultName: { fontSize: 16, fontWeight: '600', color: '#111', marginBottom: 2 },
++  cityResultSub: { fontSize: 13, color: '#888' },
++  noResults: { textAlign: 'center', color: '#999', marginTop: 30, fontSize: 15 },
++});
+diff --git a/src/screens/city/JotsTab.tsx b/src/screens/city/JotsTab.tsx
+new file mode 100644
+index 0000000..552d840
+--- /dev/null
++++ b/src/screens/city/JotsTab.tsx
+@@ -0,0 +1,144 @@
++import React, { useState, useEffect } from 'react';
++import {
++  View, Text, FlatList, TextInput, TouchableOpacity,
++  StyleSheet, KeyboardAvoidingView, Platform, Alert,
++} from 'react-native';
++import { supabase } from '../../lib/supabase';
++import { useAuth } from '../../context/AuthContext';
++import { Jot } from '../../types';
++
++type Props = { tripId: string };
++
++export default function JotsTab({ tripId }: Props) {
++  const { user } = useAuth();
++  const [jots, setJots] = useState<Jot[]>([]);
++  const [text, setText] = useState('');
++  const [saving, setSaving] = useState(false);
++
++  useEffect(() => {
++    fetchJots();
++  }, [tripId]);
++
++  const fetchJots = async () => {
++    const { data, error } = await supabase
++      .from('jots')
++      .select('*')
++      .eq('trip_id', tripId)
++      .order('created_at', { ascending: false });
++    if (!error && data) setJots(data as Jot[]);
++  };
++
++  const saveJot = async () => {
++    if (!text.trim()) return;
++    setSaving(true);
++    const { error } = await supabase.from('jots').insert({
++      trip_id: tripId,
++      user_id: user!.id,
++      content: text.trim(),
++    });
++    setSaving(false);
++    if (error) { Alert.alert('Error', error.message); return; }
++    setText('');
++    fetchJots();
++  };
++
++  const deleteJot = async (id: string) => {
++    await supabase.from('jots').delete().eq('id', id);
++    setJots((prev) => prev.filter((j) => j.id !== id));
++  };
++
++  const formatDate = (iso: string) => {
++    const d = new Date(iso);
++    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
++  };
++
++  return (
++    <KeyboardAvoidingView
++      style={styles.container}
++      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
++      keyboardVerticalOffset={140}
++    >
++      <FlatList
++        data={jots}
++        keyExtractor={(item) => item.id}
++        contentContainerStyle={styles.list}
++        renderItem={({ item }) => (
++          <View style={styles.jot}>
++            <Text style={styles.jotText}>{item.content}</Text>
++            <View style={styles.jotFooter}>
++              <Text style={styles.jotDate}>{formatDate(item.created_at)}</Text>
++              <TouchableOpacity onPress={() => deleteJot(item.id)}>
++                <Text style={styles.deleteText}>Delete</Text>
++              </TouchableOpacity>
++            </View>
++          </View>
++        )}
++        ListEmptyComponent={
++          <Text style={styles.emptyText}>No jots yet. Write down a memory below.</Text>
++        }
++      />
++
++      <View style={styles.inputDock}>
++        <TextInput
++          style={styles.input}
++          placeholder="Write a jot about this trip..."
++          placeholderTextColor="#999"
++          value={text}
++          onChangeText={setText}
++          multiline
++          maxLength={500}
++        />
++        <TouchableOpacity style={styles.sendBtn} onPress={saveJot} disabled={saving || !text.trim()}>
++          <Text style={styles.sendText}>Save</Text>
++        </TouchableOpacity>
++      </View>
++    </KeyboardAvoidingView>
++  );
++}
++
++const styles = StyleSheet.create({
++  container: { flex: 1, backgroundColor: '#fff' },
++  list: { padding: 16, paddingBottom: 8 },
++  jot: {
++    backgroundColor: '#FFFBF0',
++    borderRadius: 14,
++    padding: 16,
++    marginBottom: 12,
++    borderLeftWidth: 4,
++    borderLeftColor: '#FFD700',
++  },
++  jotText: { fontSize: 15, color: '#222', lineHeight: 22 },
++  jotFooter: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 10 },
++  jotDate: { fontSize: 12, color: '#aaa' },
++  deleteText: { fontSize: 12, color: '#FF5A5F' },
++  emptyText: { textAlign: 'center', color: '#999', marginTop: 50, fontSize: 15, paddingHorizontal: 30 },
++  inputDock: {
++    flexDirection: 'row',
++    alignItems: 'flex-end',
++    paddingHorizontal: 16,
++    paddingTop: 12,
++    paddingBottom: 40,
++    borderTopWidth: 1,
++    borderTopColor: '#f0f0f0',
++    backgroundColor: '#fff',
++    gap: 10,
++  },
++  input: {
++    flex: 1,
++    borderWidth: 1,
++    borderColor: '#ddd',
++    borderRadius: 16,
++    paddingVertical: 12,
++    paddingHorizontal: 16,
++    fontSize: 15,
++    maxHeight: 120,
++    color: '#000',
++  },
++  sendBtn: {
++    backgroundColor: '#000',
++    borderRadius: 20,
++    paddingVertical: 12,
++    paddingHorizontal: 20,
++  },
++  sendText: { color: '#fff', fontWeight: 'bold', fontSize: 15 },
++});
+diff --git a/src/screens/city/LandmarksTab.tsx b/src/screens/city/LandmarksTab.tsx
+new file mode 100644
+index 0000000..01f7826
+--- /dev/null
++++ b/src/screens/city/LandmarksTab.tsx
+@@ -0,0 +1,149 @@
++import React, { useState, useEffect } from 'react';
++import {
++  View, Text, FlatList, TextInput, TouchableOpacity,
++  StyleSheet, Alert,
++} from 'react-native';
++import { supabase } from '../../lib/supabase';
++import { useAuth } from '../../context/AuthContext';
++import { Landmark } from '../../types';
++
++type Props = { tripId: string };
++
++export default function LandmarksTab({ tripId }: Props) {
++  const { user } = useAuth();
++  const [landmarks, setLandmarks] = useState<Landmark[]>([]);
++  const [newName, setNewName] = useState('');
++  const [adding, setAdding] = useState(false);
++
++  useEffect(() => {
++    fetchLandmarks();
++  }, [tripId]);
++
++  const fetchLandmarks = async () => {
++    const { data, error } = await supabase
++      .from('landmarks')
++      .select('*')
++      .eq('trip_id', tripId)
++      .order('created_at', { ascending: true });
++    if (!error && data) setLandmarks(data as Landmark[]);
++  };
++
++  const addLandmark = async () => {
++    if (!newName.trim()) return;
++    setAdding(true);
++    const { error } = await supabase.from('landmarks').insert({
++      trip_id: tripId,
++      user_id: user!.id,
++      name: newName.trim(),
++      visited: false,
++      source: 'manual',
++    });
++    setAdding(false);
++    if (error) { Alert.alert('Error', error.message); return; }
++    setNewName('');
++    fetchLandmarks();
++  };
++
++  const toggleVisited = async (item: Landmark) => {
++    await supabase.from('landmarks').update({ visited: !item.visited }).eq('id', item.id);
++    setLandmarks((prev) =>
++      prev.map((l) => (l.id === item.id ? { ...l, visited: !l.visited } : l))
++    );
++  };
++
++  const deleteLandmark = async (id: string) => {
++    await supabase.from('landmarks').delete().eq('id', id);
++    setLandmarks((prev) => prev.filter((l) => l.id !== id));
++  };
++
++  return (
++    <View style={styles.container}>
++      <FlatList
++        data={landmarks}
++        keyExtractor={(item) => item.id}
++        contentContainerStyle={styles.list}
++        renderItem={({ item }) => (
++          <View style={styles.row}>
++            <TouchableOpacity style={styles.checkbox} onPress={() => toggleVisited(item)}>
++              <Text style={styles.checkboxText}>{item.visited ? '✅' : '⬜'}</Text>
++            </TouchableOpacity>
++            <View style={styles.rowInfo}>
++              <Text style={[styles.name, item.visited && styles.nameVisited]}>{item.name}</Text>
++              {item.source === 'ai' && <Text style={styles.aiBadge}>AI detected</Text>}
++            </View>
++            <TouchableOpacity onPress={() => deleteLandmark(item.id)}>
++              <Text style={styles.deleteText}>✕</Text>
++            </TouchableOpacity>
++          </View>
++        )}
++        ListEmptyComponent={
++          <Text style={styles.emptyText}>No landmarks yet. Add one below or upload a photo to auto-detect.</Text>
++        }
++      />
++
++      <View style={styles.inputDock}>
++        <TextInput
++          style={styles.input}
++          placeholder="Add a landmark..."
++          placeholderTextColor="#999"
++          value={newName}
++          onChangeText={setNewName}
++          onSubmitEditing={addLandmark}
++          returnKeyType="done"
++        />
++        <TouchableOpacity style={styles.addBtn} onPress={addLandmark} disabled={adding || !newName.trim()}>
++          <Text style={styles.addBtnText}>Add</Text>
++        </TouchableOpacity>
++      </View>
++    </View>
++  );
++}
++
++const styles = StyleSheet.create({
++  container: { flex: 1, backgroundColor: '#fff' },
++  list: { padding: 16, paddingBottom: 8 },
++  row: {
++    flexDirection: 'row',
++    alignItems: 'center',
++    paddingVertical: 14,
++    borderBottomWidth: 1,
++    borderBottomColor: '#f5f5f5',
++  },
++  checkbox: { marginRight: 12 },
++  checkboxText: { fontSize: 20 },
++  rowInfo: { flex: 1 },
++  name: { fontSize: 16, color: '#111' },
++  nameVisited: { color: '#aaa', textDecorationLine: 'line-through' },
++  aiBadge: {
++    fontSize: 11, color: '#00A699', marginTop: 2,
++    fontWeight: '600', letterSpacing: 0.3,
++  },
++  deleteText: { fontSize: 16, color: '#ccc', paddingLeft: 10 },
++  emptyText: { textAlign: 'center', color: '#999', marginTop: 50, fontSize: 15, paddingHorizontal: 30 },
++  inputDock: {
++    flexDirection: 'row',
++    alignItems: 'center',
++    paddingHorizontal: 16,
++    paddingTop: 12,
++    paddingBottom: 40,
++    borderTopWidth: 1,
++    borderTopColor: '#f0f0f0',
++    backgroundColor: '#fff',
++    gap: 10,
++  },
++  input: {
++    flex: 1,
++    borderWidth: 1,
++    borderColor: '#ddd',
++    borderRadius: 12,
++    paddingVertical: 12,
++    paddingHorizontal: 14,
++    fontSize: 15,
++    color: '#000',
++  },
++  addBtn: {
++    backgroundColor: '#000', borderRadius: 12,
++    paddingVertical: 12, paddingHorizontal: 20,
++  },
++  addBtnText: { color: '#fff', fontWeight: 'bold', fontSize: 15 },
++});
+diff --git a/src/screens/city/PhotosTab.tsx b/src/screens/city/PhotosTab.tsx
+new file mode 100644
+index 0000000..3f4eb83
+--- /dev/null
++++ b/src/screens/city/PhotosTab.tsx
+@@ -0,0 +1,208 @@
++import React, { useState, useEffect } from 'react';
++import {
++  View, Text, FlatList, Image, TouchableOpacity, StyleSheet,
++  ActivityIndicator, Alert, Modal, Pressable,
++} from 'react-native';
++import * as ImagePicker from 'expo-image-picker';
++import { supabase } from '../../lib/supabase';
++import { analyzePhoto } from '../../lib/gemini';
++import { useAuth } from '../../context/AuthContext';
++import { Photo, AiTags } from '../../types';
++
++type Props = { tripId: string };
++
++type Suggestion = { type: 'landmark' | 'restaurant'; name: string };
++
++export default function PhotosTab({ tripId }: Props) {
++  const { user } = useAuth();
++  const [photos, setPhotos] = useState<Photo[]>([]);
++  const [uploading, setUploading] = useState(false);
++  const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
++  const [showSuggestions, setShowSuggestions] = useState(false);
++  const [pendingTripId, setPendingTripId] = useState<string | null>(null);
++
++  useEffect(() => {
++    fetchPhotos();
++  }, [tripId]);
++
++  const fetchPhotos = async () => {
++    const { data, error } = await supabase
++      .from('photos')
++      .select('*')
++      .eq('trip_id', tripId)
++      .order('created_at', { ascending: false });
++    if (!error && data) setPhotos(data as Photo[]);
++  };
++
++  const pickAndUpload = async () => {
++    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
++    if (status !== 'granted') {
++      Alert.alert('Permission needed', 'Please allow photo library access in Settings.');
++      return;
++    }
++
++    const result = await ImagePicker.launchImageLibraryAsync({
++      mediaTypes: ['images'],
++      quality: 0.8,
++      base64: true,
++    });
++
++    if (result.canceled || !result.assets[0]) return;
++
++    const asset = result.assets[0];
++    setUploading(true);
++
++    try {
++      const ext = asset.uri.split('.').pop() ?? 'jpg';
++      const fileName = `${Date.now()}.${ext}`;
++      const storagePath = `${user!.id}/${tripId}/${fileName}`;
++
++      const fetchRes = await fetch(asset.uri);
++      const blob = await fetchRes.blob();
++
++      const { error: uploadError } = await supabase.storage
++        .from('photos')
++        .upload(storagePath, blob, { contentType: `image/${ext}`, upsert: false });
++
++      if (uploadError) throw new Error(uploadError.message);
++
++      const { data: { publicUrl } } = supabase.storage.from('photos').getPublicUrl(storagePath);
++
++      let aiTags: AiTags = { landmarks: [], restaurants: [], tags: [] };
++      if (asset.base64) {
++        aiTags = await analyzePhoto(asset.base64);
++      }
++
++      const { error: dbError } = await supabase.from('photos').insert({
++        trip_id: tripId,
++        user_id: user!.id,
++        storage_path: storagePath,
++        url: publicUrl,
++        ai_tags: aiTags,
++      });
++
++      if (dbError) throw new Error(dbError.message);
++
++      fetchPhotos();
++
++      const found: Suggestion[] = [
++        ...aiTags.landmarks.map((name) => ({ type: 'landmark' as const, name })),
++        ...aiTags.restaurants.map((name) => ({ type: 'restaurant' as const, name })),
++      ];
++      if (found.length > 0) {
++        setSuggestions(found);
++        setPendingTripId(tripId);
++        setShowSuggestions(true);
++      }
++    } catch (err: any) {
++      Alert.alert('Upload failed', err.message);
++    } finally {
++      setUploading(false);
++    }
++  };
++
++  const acceptSuggestion = async (s: Suggestion) => {
++    const table = s.type === 'landmark' ? 'landmarks' : 'restaurants';
++    await supabase.from(table).insert({
++      trip_id: pendingTripId,
++      user_id: user!.id,
++      name: s.name,
++      source: 'ai',
++      ...(s.type === 'landmark' ? { visited: false } : {}),
++    });
++    setSuggestions((prev) => prev.filter((x) => x.name !== s.name || x.type !== s.type));
++  };
++
++  const dismissSuggestions = () => {
++    setShowSuggestions(false);
++    setSuggestions([]);
++  };
++
++  return (
++    <View style={styles.container}>
++      <FlatList
++        data={photos}
++        keyExtractor={(item) => item.id}
++        numColumns={2}
++        contentContainerStyle={styles.gallery}
++        renderItem={({ item }) => (
++          <Image source={{ uri: item.url }} style={styles.photo} />
++        )}
++        ListEmptyComponent={
++          !uploading ? (
++            <Text style={styles.emptyText}>No photos yet. Tap below to add your first one.</Text>
++          ) : null
++        }
++      />
++
++      <View style={styles.bottomDock}>
++        <TouchableOpacity style={styles.addButton} onPress={pickAndUpload} disabled={uploading}>
++          {uploading ? (
++            <View style={styles.uploadingRow}>
++              <ActivityIndicator color="#fff" />
++              <Text style={[styles.addButtonText, { marginLeft: 10 }]}>Analyzing photo...</Text>
++            </View>
++          ) : (
++            <Text style={styles.addButtonText}>+ Add Photo</Text>
++          )}
++        </TouchableOpacity>
++      </View>
++
++      <Modal visible={showSuggestions} animationType="slide" presentationStyle="pageSheet" transparent>
++        <View style={styles.suggestionOverlay}>
++          <View style={styles.suggestionSheet}>
++            <Text style={styles.suggestionTitle}>Detected in your photo</Text>
++            <Text style={styles.suggestionSub}>Tap to add to your trip's lists</Text>
++            {suggestions.map((s) => (
++              <TouchableOpacity key={`${s.type}-${s.name}`} style={styles.suggestionRow} onPress={() => acceptSuggestion(s)}>
++                <Text style={styles.suggestionIcon}>{s.type === 'landmark' ? '🗺️' : '🍽️'}</Text>
++                <View style={styles.suggestionInfo}>
++                  <Text style={styles.suggestionName}>{s.name}</Text>
++                  <Text style={styles.suggestionType}>{s.type === 'landmark' ? 'Landmark' : 'Restaurant'}</Text>
++                </View>
++                <Text style={styles.suggestionAdd}>+ Add</Text>
++              </TouchableOpacity>
++            ))}
++            <TouchableOpacity style={styles.dismissBtn} onPress={dismissSuggestions}>
++              <Text style={styles.dismissText}>Done</Text>
++            </TouchableOpacity>
++          </View>
++        </View>
++      </Modal>
++    </View>
++  );
++}
++
++const styles = StyleSheet.create({
++  container: { flex: 1, backgroundColor: '#fff' },
++  gallery: { padding: 10 },
++  photo: { flex: 1, aspectRatio: 1, margin: 5, borderRadius: 10, backgroundColor: '#f0f0f0' },
++  emptyText: { textAlign: 'center', color: '#999', marginTop: 50, fontSize: 15, paddingHorizontal: 30 },
++  bottomDock: {
++    paddingHorizontal: 20, paddingTop: 15, paddingBottom: 40,
++    backgroundColor: '#fff', borderTopWidth: 1, borderTopColor: '#f0f0f0',
++  },
++  addButton: {
++    backgroundColor: '#000', paddingVertical: 18, borderRadius: 30, alignItems: 'center',
++  },
++  addButtonText: { color: '#fff', fontSize: 17, fontWeight: 'bold' },
++  uploadingRow: { flexDirection: 'row', alignItems: 'center' },
++  suggestionOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', justifyContent: 'flex-end' },
++  suggestionSheet: {
++    backgroundColor: '#fff', borderTopLeftRadius: 20, borderTopRightRadius: 20,
++    padding: 24, paddingBottom: 40,
++  },
++  suggestionTitle: { fontSize: 18, fontWeight: 'bold', marginBottom: 4 },
++  suggestionSub: { fontSize: 14, color: '#888', marginBottom: 20 },
++  suggestionRow: {
++    flexDirection: 'row', alignItems: 'center', paddingVertical: 14,
++    borderBottomWidth: 1, borderBottomColor: '#f0f0f0',
++  },
++  suggestionIcon: { fontSize: 24, marginRight: 12 },
++  suggestionInfo: { flex: 1 },
++  suggestionName: { fontSize: 16, fontWeight: '600', color: '#111' },
++  suggestionType: { fontSize: 13, color: '#888', marginTop: 2 },
++  suggestionAdd: { fontSize: 15, fontWeight: '600', color: '#00A699' },
++  dismissBtn: { marginTop: 20, alignItems: 'center' },
++  dismissText: { fontSize: 16, color: '#666' },
++});
+diff --git a/src/screens/city/RestaurantsTab.tsx b/src/screens/city/RestaurantsTab.tsx
+new file mode 100644
+index 0000000..9a6662c
+--- /dev/null
++++ b/src/screens/city/RestaurantsTab.tsx
+@@ -0,0 +1,204 @@
++import React, { useState, useEffect } from 'react';
++import {
++  View, Text, FlatList, TextInput, TouchableOpacity,
++  StyleSheet, Alert, Modal,
++} from 'react-native';
++import { supabase } from '../../lib/supabase';
++import { useAuth } from '../../context/AuthContext';
++import { Restaurant } from '../../types';
++
++type Props = { tripId: string };
++
++const STARS = [1, 2, 3, 4, 5];
++
++export default function RestaurantsTab({ tripId }: Props) {
++  const { user } = useAuth();
++  const [restaurants, setRestaurants] = useState<Restaurant[]>([]);
++  const [showAdd, setShowAdd] = useState(false);
++  const [newName, setNewName] = useState('');
++  const [newRating, setNewRating] = useState(0);
++  const [newNotes, setNewNotes] = useState('');
++  const [saving, setSaving] = useState(false);
++
++  useEffect(() => {
++    fetchRestaurants();
++  }, [tripId]);
++
++  const fetchRestaurants = async () => {
++    const { data, error } = await supabase
++      .from('restaurants')
++      .select('*')
++      .eq('trip_id', tripId)
++      .order('created_at', { ascending: true });
++    if (!error && data) setRestaurants(data as Restaurant[]);
++  };
++
++  const saveRestaurant = async () => {
++    if (!newName.trim()) return;
++    setSaving(true);
++    const { error } = await supabase.from('restaurants').insert({
++      trip_id: tripId,
++      user_id: user!.id,
++      name: newName.trim(),
++      rating: newRating || null,
++      notes: newNotes.trim() || null,
++      source: 'manual',
++    });
++    setSaving(false);
++    if (error) { Alert.alert('Error', error.message); return; }
++    setShowAdd(false);
++    setNewName('');
++    setNewRating(0);
++    setNewNotes('');
++    fetchRestaurants();
++  };
++
++  const deleteRestaurant = async (id: string) => {
++    await supabase.from('restaurants').delete().eq('id', id);
++    setRestaurants((prev) => prev.filter((r) => r.id !== id));
++  };
++
++  const renderStars = (rating: number | null) => {
++    if (!rating) return null;
++    return <Text style={styles.stars}>{'★'.repeat(rating)}{'☆'.repeat(5 - rating)}</Text>;
++  };
++
++  return (
++    <View style={styles.container}>
++      <FlatList
++        data={restaurants}
++        keyExtractor={(item) => item.id}
++        contentContainerStyle={styles.list}
++        renderItem={({ item }) => (
++          <View style={styles.card}>
++            <View style={styles.cardHeader}>
++              <Text style={styles.cardName}>{item.name}</Text>
++              <TouchableOpacity onPress={() => deleteRestaurant(item.id)}>
++                <Text style={styles.deleteText}>✕</Text>
++              </TouchableOpacity>
++            </View>
++            {renderStars(item.rating)}
++            {item.notes ? <Text style={styles.notes}>{item.notes}</Text> : null}
++            {item.source === 'ai' && <Text style={styles.aiBadge}>AI detected</Text>}
++          </View>
++        )}
++        ListEmptyComponent={
++          <Text style={styles.emptyText}>No restaurants yet. Add one below or upload a photo to auto-detect.</Text>
++        }
++      />
++
++      <View style={styles.bottomDock}>
++        <TouchableOpacity style={styles.addButton} onPress={() => setShowAdd(true)}>
++          <Text style={styles.addButtonText}>+ Add Restaurant</Text>
++        </TouchableOpacity>
++      </View>
++
++      <Modal visible={showAdd} animationType="slide" presentationStyle="pageSheet">
++        <View style={styles.modal}>
++          <View style={styles.modalHeader}>
++            <Text style={styles.modalTitle}>Add Restaurant</Text>
++            <TouchableOpacity onPress={() => setShowAdd(false)}>
++              <Text style={styles.cancelText}>Cancel</Text>
++            </TouchableOpacity>
++          </View>
++
++          <View style={styles.modalBody}>
++            <Text style={styles.label}>Name *</Text>
++            <TextInput
++              style={styles.input}
++              placeholder="Restaurant name"
++              placeholderTextColor="#999"
++              value={newName}
++              onChangeText={setNewName}
++              autoFocus
++            />
++
++            <Text style={styles.label}>Rating</Text>
++            <View style={styles.starPicker}>
++              {STARS.map((s) => (
++                <TouchableOpacity key={s} onPress={() => setNewRating(s)}>
++                  <Text style={[styles.starOption, s <= newRating && styles.starSelected]}>★</Text>
++                </TouchableOpacity>
++              ))}
++            </View>
++
++            <Text style={styles.label}>Notes</Text>
++            <TextInput
++              style={[styles.input, styles.notesInput]}
++              placeholder="What did you love? Any must-order dishes?"
++              placeholderTextColor="#999"
++              value={newNotes}
++              onChangeText={setNewNotes}
++              multiline
++            />
++
++            <TouchableOpacity
++              style={[styles.saveBtn, (!newName.trim() || saving) && styles.saveBtnDisabled]}
++              onPress={saveRestaurant}
++              disabled={!newName.trim() || saving}
++            >
++              <Text style={styles.saveBtnText}>Save</Text>
++            </TouchableOpacity>
++          </View>
++        </View>
++      </Modal>
++    </View>
++  );
++}
++
++const styles = StyleSheet.create({
++  container: { flex: 1, backgroundColor: '#fff' },
++  list: { padding: 16, paddingBottom: 8 },
++  card: {
++    backgroundColor: '#fff',
++    borderRadius: 14,
++    padding: 16,
++    marginBottom: 12,
++    shadowColor: '#000',
++    shadowOffset: { width: 0, height: 1 },
++    shadowOpacity: 0.06,
++    shadowRadius: 6,
++    elevation: 2,
++    borderWidth: 1,
++    borderColor: '#f0f0f0',
++  },
++  cardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' },
++  cardName: { fontSize: 16, fontWeight: '700', color: '#111', flex: 1 },
++  deleteText: { fontSize: 16, color: '#ccc', paddingLeft: 10 },
++  stars: { fontSize: 16, color: '#FFD700', marginTop: 4 },
++  notes: { fontSize: 14, color: '#555', marginTop: 6, lineHeight: 20 },
++  aiBadge: { fontSize: 11, color: '#00A699', marginTop: 6, fontWeight: '600', letterSpacing: 0.3 },
++  emptyText: { textAlign: 'center', color: '#999', marginTop: 50, fontSize: 15, paddingHorizontal: 30 },
++  bottomDock: {
++    paddingHorizontal: 20, paddingTop: 15, paddingBottom: 40,
++    backgroundColor: '#fff', borderTopWidth: 1, borderTopColor: '#f0f0f0',
++  },
++  addButton: {
++    backgroundColor: '#000', paddingVertical: 18, borderRadius: 30, alignItems: 'center',
++  },
++  addButtonText: { color: '#fff', fontSize: 17, fontWeight: 'bold' },
++  modal: { flex: 1, backgroundColor: '#fff' },
++  modalHeader: {
++    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
++    paddingHorizontal: 20, paddingTop: 20, paddingBottom: 16,
++    borderBottomWidth: 1, borderBottomColor: '#f0f0f0',
++  },
++  modalTitle: { fontSize: 20, fontWeight: 'bold' },
++  cancelText: { fontSize: 16, color: '#666' },
++  modalBody: { padding: 20 },
++  label: { fontSize: 13, fontWeight: '600', color: '#888', marginBottom: 8, marginTop: 16, letterSpacing: 0.5 },
++  input: {
++    borderWidth: 1, borderColor: '#ddd', borderRadius: 12,
++    paddingVertical: 12, paddingHorizontal: 14, fontSize: 16, color: '#000',
++  },
++  notesInput: { height: 100, textAlignVertical: 'top' },
++  starPicker: { flexDirection: 'row', gap: 8 },
++  starOption: { fontSize: 32, color: '#ddd' },
++  starSelected: { color: '#FFD700' },
++  saveBtn: {
++    backgroundColor: '#000', paddingVertical: 16, borderRadius: 30,
++    alignItems: 'center', marginTop: 30,
++  },
++  saveBtnDisabled: { backgroundColor: '#ccc' },
++  saveBtnText: { color: '#fff', fontSize: 16, fontWeight: 'bold' },
++});
+diff --git a/src/types/index.ts b/src/types/index.ts
+new file mode 100644
+index 0000000..923e30f
+--- /dev/null
++++ b/src/types/index.ts
+@@ -0,0 +1,56 @@
++export type Trip = {
++  id: string;
++  user_id: string;
++  city_name: string;
++  country: string | null;
++  lat: number;
++  lng: number;
++  visit_date: string | null;
++  cover_photo_url: string | null;
++  created_at: string;
++};
++
++export type Photo = {
++  id: string;
++  trip_id: string;
++  user_id: string;
++  storage_path: string;
++  url: string;
++  ai_tags: AiTags | null;
++  created_at: string;
++};
++
++export type AiTags = {
++  landmarks: string[];
++  restaurants: string[];
++  tags: string[];
++};
++
++export type Jot = {
++  id: string;
++  trip_id: string;
++  user_id: string;
++  content: string;
++  created_at: string;
++};
++
++export type Landmark = {
++  id: string;
++  trip_id: string;
++  user_id: string;
++  name: string;
++  visited: boolean;
++  source: 'manual' | 'ai';
++  created_at: string;
++};
++
++export type Restaurant = {
++  id: string;
++  trip_id: string;
++  user_id: string;
++  name: string;
++  rating: number | null;
++  notes: string | null;
++  source: 'manual' | 'ai';
++  created_at: string;
++};
+diff --git a/supabase-schema.sql b/supabase-schema.sql
+new file mode 100644
+index 0000000..e4f3ca0
+--- /dev/null
++++ b/supabase-schema.sql
+@@ -0,0 +1,88 @@
++-- Run this entire file in your Supabase project's SQL Editor
++
++-- TRIPS
++create table if not exists trips (
++  id uuid default gen_random_uuid() primary key,
++  user_id uuid references auth.users(id) on delete cascade not null,
++  city_name text not null,
++  country text,
++  lat double precision not null,
++  lng double precision not null,
++  visit_date date,
++  cover_photo_url text,
++  created_at timestamptz default now()
++);
++alter table trips enable row level security;
++create policy "Users manage own trips" on trips
++  for all using (auth.uid() = user_id);
++
++-- PHOTOS
++create table if not exists photos (
++  id uuid default gen_random_uuid() primary key,
++  trip_id uuid references trips(id) on delete cascade not null,
++  user_id uuid references auth.users(id) on delete cascade not null,
++  storage_path text not null,
++  url text not null,
++  ai_tags jsonb,
++  created_at timestamptz default now()
++);
++alter table photos enable row level security;
++create policy "Users manage own photos" on photos
++  for all using (auth.uid() = user_id);
++
++-- JOTS
++create table if not exists jots (
++  id uuid default gen_random_uuid() primary key,
++  trip_id uuid references trips(id) on delete cascade not null,
++  user_id uuid references auth.users(id) on delete cascade not null,
++  content text not null,
++  created_at timestamptz default now()
++);
++alter table jots enable row level security;
++create policy "Users manage own jots" on jots
++  for all using (auth.uid() = user_id);
++
++-- LANDMARKS
++create table if not exists landmarks (
++  id uuid default gen_random_uuid() primary key,
++  trip_id uuid references trips(id) on delete cascade not null,
++  user_id uuid references auth.users(id) on delete cascade not null,
++  name text not null,
++  visited boolean default false,
++  source text default 'manual',
++  created_at timestamptz default now()
++);
++alter table landmarks enable row level security;
++create policy "Users manage own landmarks" on landmarks
++  for all using (auth.uid() = user_id);
++
++-- RESTAURANTS
++create table if not exists restaurants (
++  id uuid default gen_random_uuid() primary key,
++  trip_id uuid references trips(id) on delete cascade not null,
++  user_id uuid references auth.users(id) on delete cascade not null,
++  name text not null,
++  rating integer check (rating between 1 and 5),
++  notes text,
++  source text default 'manual',
++  created_at timestamptz default now()
++);
++alter table restaurants enable row level security;
++create policy "Users manage own restaurants" on restaurants
++  for all using (auth.uid() = user_id);
++
++-- STORAGE BUCKET
++-- Go to Storage in your Supabase dashboard and create a bucket named "photos"
++-- Set it to Public (so photo URLs work without expiry)
++-- Then add this storage policy in the SQL editor:
++insert into storage.buckets (id, name, public) values ('photos', 'photos', true)
++  on conflict (id) do nothing;
++
++create policy "Users upload own photos" on storage.objects
++  for insert with check (auth.uid()::text = (storage.foldername(name))[1]);
++
++create policy "Public photo read" on storage.objects
++  for select using (bucket_id = 'photos');
++
++create policy "Users delete own photos" on storage.objects
++  for delete using (auth.uid()::text = (storage.foldername(name))[1]);
+-- 
+2.43.0
+
