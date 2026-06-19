@@ -1,36 +1,52 @@
-import { useEffect } from 'react';
+import 'react-native-url-polyfill/auto';
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
-import { Text, View } from 'react-native';
+import { ActivityIndicator, View } from 'react-native';
 
+import { AuthProvider, useAuth } from './src/context/AuthContext';
+import AuthScreen from './src/screens/AuthScreen';
 import HomeScreen from './src/screens/HomeScreen';
-import { initDB } from './src/db/database';
-
-// We will keep CityScreen as a placeholder for now
-function CityScreen() {
-  return (
-    <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
-      <Text style={{ fontSize: 20, fontWeight: 'bold' }}>City Pins & Restaurants</Text>
-    </View>
-  );
-}
+import CityScreen from './src/screens/CityScreen';
 
 const Stack = createNativeStackNavigator();
 
-export default function App() {
+function AppNavigator() {
+  const { session, loading } = useAuth();
+
+  if (loading) {
+    return (
+      <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+        <ActivityIndicator size="large" color="#000" />
+      </View>
+    );
+  }
+
+  if (!session) {
+    return <AuthScreen />;
+  }
+
   return (
     <NavigationContainer>
       <Stack.Navigator initialRouteName="Home">
-        <Stack.Screen 
-          name="Home" 
-          component={HomeScreen} 
-          options={{ title: 'My Travels' }} 
+        <Stack.Screen
+          name="Home"
+          component={HomeScreen}
+          options={{ title: 'My Travels' }}
         />
-        <Stack.Screen 
-          name="City" 
-          component={CityScreen} 
+        <Stack.Screen
+          name="City"
+          component={CityScreen}
+          options={({ route }: any) => ({ title: route.params?.trip?.city_name ?? 'Trip' })}
         />
       </Stack.Navigator>
     </NavigationContainer>
+  );
+}
+
+export default function App() {
+  return (
+    <AuthProvider>
+      <AppNavigator />
+    </AuthProvider>
   );
 }

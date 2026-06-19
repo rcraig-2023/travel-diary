@@ -1,124 +1,227 @@
-import React from 'react';
-import { StyleSheet, View, Text, TextInput, TouchableOpacity } from 'react-native';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import {
+  StyleSheet, View, Text, TextInput, TouchableOpacity,
+  Modal, FlatList, ActivityIndicator, Alert,
+} from 'react-native';
 import MapView, { Marker } from 'react-native-maps';
 import { useNavigation } from '@react-navigation/native';
+import { supabase } from '../lib/supabase';
+import { useAuth } from '../context/AuthContext';
+import { Trip } from '../types';
+
+type NominatimResult = {
+  place_id: number;
+  display_name: string;
+  lat: string;
+  lon: string;
+  address: {
+    city?: string;
+    town?: string;
+    village?: string;
+    country?: string;
+  };
+};
 
 export default function HomeScreen() {
-  // Initialize navigation so we can route to the City screen
   const navigation = useNavigation<any>();
+  const { user } = useAuth();
+  const [trips, setTrips] = useState<Trip[]>([]);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [showLogModal, setShowLogModal] = useState(false);
+  const [citySearch, setCitySearch] = useState('');
+  const [cityResults, setCityResults] = useState<NominatimResult[]>([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [creatingTrip, setCreatingTrip] = useState(false);
+  const debounceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    fetchTrips();
+  }, []);
+
+  const fetchTrips = async () => {
+    const { data, error } = await supabase
+      .from('trips')
+      .select('*')
+      .order('created_at', { ascending: false });
+    if (!error && data) setTrips(data as Trip[]);
+  };
+
+  const searchCities = useCallback(async (query: string) => {
+    if (query.length < 2) { setCityResults([]); return; }
+    setSearchLoading(true);
+    try {
+      const res = await fetch(
+        `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=json&limit=6&addressdetails=1`,
+        { headers: { 'User-Agent': 'TravelDiaryApp/1.0' } }
+      );
+      const data: NominatimResult[] = await res.json();
+      setCityResults(data);
+    } catch {
+      setCityResults([]);
+    }
+    setSearchLoading(false);
+  }, []);
+
+  useEffect(() => {
+    if (debounceTimer.current) clearTimeout(debounceTimer.current);
+    debounceTimer.current = setTimeout(() => searchCities(citySearch), 400);
+    return () => { if (debounceTimer.current) clearTimeout(debounceTimer.current); };
+  }, [citySearch, searchCities]);
+
+  const logTrip = async (result: NominatimResult) => {
+    const cityName =
+      result.address.city ||
+      result.address.town ||
+      result.address.village ||
+      result.display_name.split(',')[0].trim();
+
+    setCreatingTrip(true);
+    const { data, error } = await supabase
+      .from('trips')
+      .insert({
+        user_id: user!.id,
+        city_name: cityName,
+        country: result.address.country ?? null,
+        lat: parseFloat(result.lat),
+        lng: parseFloat(result.lon),
+        visit_date: new Date().toISOString().split('T')[0],
+      })
+      .select()
+      .single();
+    setCreatingTrip(false);
+
+    if (error) { Alert.alert('Error', error.message); return; }
+
+    closeModal();
+    fetchTrips();
+    navigation.navigate('City', { trip: data });
+  };
+
+  const closeModal = () => {
+    setShowLogModal(false);
+    setCitySearch('');
+    setCityResults([]);
+  };
+
+  const filteredTrips = trips.filter((t) =>
+    t.city_name.toLowerCase().includes(searchQuery.toLowerCase())
+  );
 
   return (
     <View style={styles.container}>
-      {/* StyleSheet.absoluteFillObject forces the map to the absolute edges.
-        minZoomLevel prevents the user from pinching out into the gray grid void.
-      */}
-      <MapView 
+      <MapView
         style={StyleSheet.absoluteFillObject}
-        minZoomLevel={3} 
-        initialRegion={{
-          latitude: 40.0000,      // Centered lower so we see more landmass
-          longitude: -30.0000,    
-          latitudeDelta: 45.0,    // Reduced from 70 to keep tiles filling the screen
-          longitudeDelta: 45.0,
-        }}
+        minZoomLevel={2}
+        initialRegion={{ latitude: 20, longitude: 0, latitudeDelta: 100, longitudeDelta: 100 }}
       >
-        {/* Domestic Pins */}
-        <Marker
-          coordinate={{ latitude: 40.7128, longitude: -74.0060 }}
-          title="New York"
-          description="Great sushi and matcha lattes"
-          pinColor="#FF5A5F"
-        />
-        <Marker
-          coordinate={{ latitude: 41.3111, longitude: -72.9267 }}
-          title="New Haven"
-          description="Day trip & campus tour"
-          pinColor="#FF5A5F"
-        />
-
-        {/* International Pins */}
-        <Marker
-          coordinate={{ latitude: 48.8566, longitude: 2.3522 }}
-          title="Paris"
-          description="Winter 2026 - Eiffel Tower views"
-          pinColor="#00A699"
-          // This routes the user to the City Screen when the bubble is tapped!
-          onCalloutPress={() => navigation.navigate('City')}
-        />
-        <Marker
-          coordinate={{ latitude: 52.5200, longitude: 13.4050 }}
-          title="Berlin"
-          description="Family travels"
-          pinColor="#00A699"
-        />
-        <Marker
-          coordinate={{ latitude: 50.0755, longitude: 14.4378 }}
-          title="Prague"
-          description="Summer trip"
-          pinColor="#00A699"
-        />
+        {filteredTrips.map((trip) => (
+          <Marker
+            key={trip.id}
+            coordinate={{ latitude: trip.lat, longitude: trip.lng }}
+            title={trip.city_name}
+            description={trip.country ?? ''}
+            pinColor={trip.country === 'United States' ? '#FF5A5F' : '#00A699'}
+            onCalloutPress={() => navigation.navigate('City', { trip })}
+          />
+        ))}
       </MapView>
 
-      {/* Top Search Bar Overlay */}
       <View style={styles.topContainer}>
-        <TextInput 
+        <TextInput
           style={styles.searchBar}
-          placeholder="Search your pins (e.g. 'Paris' or 'Texas')"
+          placeholder="Search your trips..."
           placeholderTextColor="#666"
+          value={searchQuery}
+          onChangeText={setSearchQuery}
         />
       </View>
 
-      {/* Floating Action Button */}
-      <TouchableOpacity 
-        style={styles.floatingButton}
-        activeOpacity={0.8}
-        onPress={() => console.log("Add Trip tapped!")}
-      >
+      <TouchableOpacity style={styles.floatingButton} activeOpacity={0.85} onPress={() => setShowLogModal(true)}>
         <Text style={styles.buttonText}>+ Log Trip</Text>
       </TouchableOpacity>
+
+      <Modal visible={showLogModal} animationType="slide" presentationStyle="pageSheet">
+        <View style={styles.modal}>
+          <View style={styles.modalHeader}>
+            <Text style={styles.modalTitle}>Where did you go?</Text>
+            <TouchableOpacity onPress={closeModal}>
+              <Text style={styles.cancelText}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+
+          <TextInput
+            style={styles.cityInput}
+            placeholder="Search a city or town..."
+            placeholderTextColor="#999"
+            value={citySearch}
+            onChangeText={setCitySearch}
+            autoFocus
+          />
+
+          {(searchLoading || creatingTrip) && (
+            <ActivityIndicator style={styles.spinner} color="#000" />
+          )}
+
+          <FlatList
+            data={cityResults}
+            keyExtractor={(item) => item.place_id.toString()}
+            keyboardShouldPersistTaps="handled"
+            renderItem={({ item }) => (
+              <TouchableOpacity
+                style={styles.cityResult}
+                onPress={() => logTrip(item)}
+                disabled={creatingTrip}
+              >
+                <Text style={styles.cityResultName}>
+                  {item.address.city || item.address.town || item.address.village || item.display_name.split(',')[0]}
+                </Text>
+                <Text style={styles.cityResultSub} numberOfLines={1}>{item.display_name}</Text>
+              </TouchableOpacity>
+            )}
+            ListEmptyComponent={
+              citySearch.length >= 2 && !searchLoading
+                ? <Text style={styles.noResults}>No results found.</Text>
+                : null
+            }
+          />
+        </View>
+      </Modal>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-  },
-  topContainer: {
-    position: 'absolute',
-    top: 60,
-    width: '100%',
-    paddingHorizontal: 20,
-  },
+  container: { flex: 1 },
+  topContainer: { position: 'absolute', top: 60, width: '100%', paddingHorizontal: 20 },
   searchBar: {
-    backgroundColor: '#fff',
-    paddingVertical: 12,
-    paddingHorizontal: 20,
-    borderRadius: 25,
-    fontSize: 16,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.15,
-    shadowRadius: 10,
-    elevation: 5,
+    backgroundColor: '#fff', paddingVertical: 12, paddingHorizontal: 20,
+    borderRadius: 25, fontSize: 16,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.15, shadowRadius: 10, elevation: 5,
   },
   floatingButton: {
-    position: 'absolute',
-    bottom: 50,
-    alignSelf: 'center',
-    backgroundColor: '#000',
-    paddingVertical: 16,
-    paddingHorizontal: 32,
+    position: 'absolute', bottom: 50, alignSelf: 'center',
+    backgroundColor: '#000', paddingVertical: 16, paddingHorizontal: 32,
     borderRadius: 30,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 6,
-    elevation: 8,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3, shadowRadius: 6, elevation: 8,
   },
-  buttonText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: 'bold',
-  }
+  buttonText: { color: '#fff', fontSize: 16, fontWeight: 'bold' },
+  modal: { flex: 1, backgroundColor: '#fff', paddingTop: 20 },
+  modalHeader: {
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+    paddingHorizontal: 20, marginBottom: 16,
+  },
+  modalTitle: { fontSize: 20, fontWeight: 'bold' },
+  cancelText: { fontSize: 16, color: '#666' },
+  cityInput: {
+    marginHorizontal: 20, borderWidth: 1, borderColor: '#ddd',
+    borderRadius: 12, paddingVertical: 12, paddingHorizontal: 16,
+    fontSize: 16, marginBottom: 8,
+  },
+  spinner: { marginTop: 20 },
+  cityResult: { paddingVertical: 14, paddingHorizontal: 20, borderBottomWidth: 1, borderBottomColor: '#f0f0f0' },
+  cityResultName: { fontSize: 16, fontWeight: '600', color: '#111', marginBottom: 2 },
+  cityResultSub: { fontSize: 13, color: '#888' },
+  noResults: { textAlign: 'center', color: '#999', marginTop: 30, fontSize: 15 },
 });
