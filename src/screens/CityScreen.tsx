@@ -9,7 +9,7 @@ import RestaurantsTab from './city/RestaurantsTab';
 
 type RouteParams = { trip: Trip };
 
-const TABS = ['Photos', 'Jots', 'Landmarks', 'Restaurants'] as const;
+const TABS = ['Photos', 'Jots', 'Highlights', 'Restaurants'] as const;
 type Tab = typeof TABS[number];
 
 export default function CityScreen() {
@@ -49,7 +49,7 @@ export default function CityScreen() {
       <View style={styles.content}>
         {activeTab === 'Photos' && <PhotosTab tripId={trip.id} />}
         {activeTab === 'Jots' && <JotsTab tripId={trip.id} />}
-        {activeTab === 'Landmarks' && <LandmarksTab tripId={trip.id} />}
+        {activeTab === 'Highlights' && <LandmarksTab tripId={trip.id} />}
         {activeTab === 'Restaurants' && <RestaurantsTab tripId={trip.id} />}
       </View>
     </View>

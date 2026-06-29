@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import {
   View, Text, FlatList, Image, TouchableOpacity, StyleSheet,
-  ActivityIndicator, Alert, Modal, Pressable,
+  ActivityIndicator, Alert, Modal,
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import { supabase } from '../../lib/supabase';
@@ -13,13 +13,20 @@ type Props = { tripId: string };
 
 type Suggestion = { type: 'landmark' | 'restaurant'; name: string };
 
+type DisplayPhoto = {
+  id: string;
+  uri: string;        // local URI for instant display
+  remoteUrl?: string; // Supabase URL once uploaded
+  uploading?: boolean;
+};
+
 export default function PhotosTab({ tripId }: Props) {
   const { user } = useAuth();
-  const [photos, setPhotos] = useState<Photo[]>([]);
-  const [uploading, setUploading] = useState(false);
+  const [photos, setPhotos] = useState<DisplayPhoto[]>([]);
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [pendingTripId, setPendingTripId] = useState<string | null>(null);
+  const [uploading, setUploading] = useState(false);
 
   useEffect(() => {
     fetchPhotos();
@@ -31,7 +38,15 @@ export default function PhotosTab({ tripId }: Props) {
       .select('*')
       .eq('trip_id', tripId)
       .order('created_at', { ascending: false });
-    if (!error && data) setPhotos(data as Photo[]);
+    if (!error && data) {
+      setPhotos(
+        (data as Photo[]).map((p) => ({
+          id: p.id,
+          uri: p.url,
+          remoteUrl: p.url,
+        }))
+      );
+    }
   };
 
   const pickAndUpload = async () => {
@@ -50,10 +65,14 @@ export default function PhotosTab({ tripId }: Props) {
     if (result.canceled || !result.assets[0]) return;
 
     const asset = result.assets[0];
+
+    // Show photo immediately with local URI
+    const tempId = `temp-${Date.now()}`;
+    setPhotos((prev) => [{ id: tempId, uri: asset.uri, uploading: true }, ...prev]);
     setUploading(true);
 
     try {
-      const ext = asset.uri.split('.').pop() ?? 'jpg';
+      const ext = asset.uri.split('.').pop()?.toLowerCase() ?? 'jpg';
       const fileName = `${Date.now()}.${ext}`;
       const storagePath = `${user!.id}/${tripId}/${fileName}`;
 
@@ -73,17 +92,24 @@ export default function PhotosTab({ tripId }: Props) {
         aiTags = await analyzePhoto(asset.base64);
       }
 
-      const { error: dbError } = await supabase.from('photos').insert({
+      const { data: inserted, error: dbError } = await supabase.from('photos').insert({
         trip_id: tripId,
         user_id: user!.id,
         storage_path: storagePath,
         url: publicUrl,
         ai_tags: aiTags,
-      });
+      }).select().single();
 
       if (dbError) throw new Error(dbError.message);
 
-      fetchPhotos();
+      // Replace temp entry with the real one, keeping local URI as primary display source
+      setPhotos((prev) =>
+        prev.map((p) =>
+          p.id === tempId
+            ? { id: inserted.id, uri: asset.uri, remoteUrl: publicUrl, uploading: false }
+            : p
+        )
+      );
 
       const found: Suggestion[] = [
         ...aiTags.landmarks.map((name) => ({ type: 'landmark' as const, name })),
@@ -95,6 +121,8 @@ export default function PhotosTab({ tripId }: Props) {
         setShowSuggestions(true);
       }
     } catch (err: any) {
+      // Remove temp entry on failure
+      setPhotos((prev) => prev.filter((p) => p.id !== tempId));
       Alert.alert('Upload failed', err.message);
     } finally {
       setUploading(false);
@@ -110,7 +138,7 @@ export default function PhotosTab({ tripId }: Props) {
       source: 'ai',
       ...(s.type === 'landmark' ? { visited: false } : {}),
     });
-    setSuggestions((prev) => prev.filter((x) => x.name !== s.name || x.type !== s.type));
+    setSuggestions((prev) => prev.filter((x) => !(x.name === s.name && x.type === s.type)));
   };
 
   const dismissSuggestions = () => {
@@ -126,7 +154,25 @@ export default function PhotosTab({ tripId }: Props) {
         numColumns={2}
         contentContainerStyle={styles.gallery}
         renderItem={({ item }) => (
-          <Image source={{ uri: item.url }} style={styles.photo} />
+          <View style={styles.photoWrapper}>
+            <Image
+              source={{ uri: item.uri }}
+              style={styles.photo}
+              onError={() => {
+                // If local URI fails, try the remote URL
+                if (item.remoteUrl && item.uri !== item.remoteUrl) {
+                  setPhotos((prev) =>
+                    prev.map((p) => (p.id === item.id ? { ...p, uri: item.remoteUrl! } : p))
+                  );
+                }
+              }}
+            />
+            {item.uploading && (
+              <View style={styles.uploadingOverlay}>
+                <ActivityIndicator color="#fff" />
+              </View>
+            )}
+          </View>
         )}
         ListEmptyComponent={
           !uploading ? (
@@ -148,17 +194,21 @@ export default function PhotosTab({ tripId }: Props) {
         </TouchableOpacity>
       </View>
 
-      <Modal visible={showSuggestions} animationType="slide" presentationStyle="pageSheet" transparent>
+      <Modal visible={showSuggestions} animationType="slide" transparent>
         <View style={styles.suggestionOverlay}>
           <View style={styles.suggestionSheet}>
             <Text style={styles.suggestionTitle}>Detected in your photo</Text>
             <Text style={styles.suggestionSub}>Tap to add to your trip's lists</Text>
             {suggestions.map((s) => (
-              <TouchableOpacity key={`${s.type}-${s.name}`} style={styles.suggestionRow} onPress={() => acceptSuggestion(s)}>
+              <TouchableOpacity
+                key={`${s.type}-${s.name}`}
+                style={styles.suggestionRow}
+                onPress={() => acceptSuggestion(s)}
+              >
                 <Text style={styles.suggestionIcon}>{s.type === 'landmark' ? '🗺️' : '🍽️'}</Text>
                 <View style={styles.suggestionInfo}>
                   <Text style={styles.suggestionName}>{s.name}</Text>
-                  <Text style={styles.suggestionType}>{s.type === 'landmark' ? 'Landmark' : 'Restaurant'}</Text>
+                  <Text style={styles.suggestionType}>{s.type === 'landmark' ? 'Highlight' : 'Restaurant'}</Text>
                 </View>
                 <Text style={styles.suggestionAdd}>+ Add</Text>
               </TouchableOpacity>
@@ -176,15 +226,21 @@ export default function PhotosTab({ tripId }: Props) {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#fff' },
   gallery: { padding: 10 },
-  photo: { flex: 1, aspectRatio: 1, margin: 5, borderRadius: 10, backgroundColor: '#f0f0f0' },
+  photoWrapper: { flex: 1, margin: 5 },
+  photo: { width: '100%', aspectRatio: 1, borderRadius: 10, backgroundColor: '#f0f0f0' },
+  uploadingOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.35)',
+    borderRadius: 10,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
   emptyText: { textAlign: 'center', color: '#999', marginTop: 50, fontSize: 15, paddingHorizontal: 30 },
   bottomDock: {
     paddingHorizontal: 20, paddingTop: 15, paddingBottom: 40,
     backgroundColor: '#fff', borderTopWidth: 1, borderTopColor: '#f0f0f0',
   },
-  addButton: {
-    backgroundColor: '#000', paddingVertical: 18, borderRadius: 30, alignItems: 'center',
-  },
+  addButton: { backgroundColor: '#000', paddingVertical: 18, borderRadius: 30, alignItems: 'center' },
   addButtonText: { color: '#fff', fontSize: 17, fontWeight: 'bold' },
   uploadingRow: { flexDirection: 'row', alignItems: 'center' },
   suggestionOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', justifyContent: 'flex-end' },

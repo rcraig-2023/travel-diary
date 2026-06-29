@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View, Text, FlatList, TextInput, TouchableOpacity,
   StyleSheet, KeyboardAvoidingView, Platform, Alert,
@@ -14,6 +14,7 @@ export default function JotsTab({ tripId }: Props) {
   const [jots, setJots] = useState<Jot[]>([]);
   const [text, setText] = useState('');
   const [saving, setSaving] = useState(false);
+  const listRef = useRef<FlatList>(null);
 
   useEffect(() => {
     fetchJots();
@@ -55,13 +56,17 @@ export default function JotsTab({ tripId }: Props) {
   return (
     <KeyboardAvoidingView
       style={styles.container}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      keyboardVerticalOffset={140}
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}
     >
       <FlatList
+        ref={listRef}
         data={jots}
         keyExtractor={(item) => item.id}
         contentContainerStyle={styles.list}
+        keyboardDismissMode="interactive"
+        keyboardShouldPersistTaps="handled"
+        ListFooterComponent={<View style={{ height: 16 }} />}
         renderItem={({ item }) => (
           <View style={styles.jot}>
             <Text style={styles.jotText}>{item.content}</Text>
@@ -87,8 +92,13 @@ export default function JotsTab({ tripId }: Props) {
           onChangeText={setText}
           multiline
           maxLength={500}
+          scrollEnabled
         />
-        <TouchableOpacity style={styles.sendBtn} onPress={saveJot} disabled={saving || !text.trim()}>
+        <TouchableOpacity
+          style={[styles.sendBtn, (!text.trim() || saving) && styles.sendBtnDisabled]}
+          onPress={saveJot}
+          disabled={saving || !text.trim()}
+        >
           <Text style={styles.sendText}>Save</Text>
         </TouchableOpacity>
       </View>
@@ -98,7 +108,7 @@ export default function JotsTab({ tripId }: Props) {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#fff' },
-  list: { padding: 16, paddingBottom: 8 },
+  list: { padding: 16 },
   jot: {
     backgroundColor: '#FFFBF0',
     borderRadius: 14,
@@ -117,7 +127,7 @@ const styles = StyleSheet.create({
     alignItems: 'flex-end',
     paddingHorizontal: 16,
     paddingTop: 12,
-    paddingBottom: 40,
+    paddingBottom: Platform.OS === 'ios' ? 24 : 16,
     borderTopWidth: 1,
     borderTopColor: '#f0f0f0',
     backgroundColor: '#fff',
@@ -140,5 +150,6 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
     paddingHorizontal: 20,
   },
+  sendBtnDisabled: { backgroundColor: '#ccc' },
   sendText: { color: '#fff', fontWeight: 'bold', fontSize: 15 },
 });

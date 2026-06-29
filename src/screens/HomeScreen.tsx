@@ -5,6 +5,7 @@ import {
 } from 'react-native';
 import MapView, { Marker } from 'react-native-maps';
 import { useNavigation } from '@react-navigation/native';
+import * as Location from 'expo-location';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
 import { Trip } from '../types';
@@ -32,6 +33,7 @@ export default function HomeScreen() {
   const [cityResults, setCityResults] = useState<NominatimResult[]>([]);
   const [searchLoading, setSearchLoading] = useState(false);
   const [creatingTrip, setCreatingTrip] = useState(false);
+  const [locating, setLocating] = useState(false);
   const debounceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
@@ -46,16 +48,33 @@ export default function HomeScreen() {
     if (!error && data) setTrips(data as Trip[]);
   };
 
+  const deduplicateResults = (results: NominatimResult[]): NominatimResult[] => {
+    const seen = new Set<string>();
+    return results.filter((item) => {
+      const cityName = (
+        item.address.city ||
+        item.address.town ||
+        item.address.village ||
+        item.display_name.split(',')[0]
+      ).toLowerCase().trim();
+      const country = (item.address.country ?? '').toLowerCase().trim();
+      const key = `${cityName}|${country}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  };
+
   const searchCities = useCallback(async (query: string) => {
     if (query.length < 2) { setCityResults([]); return; }
     setSearchLoading(true);
     try {
       const res = await fetch(
-        `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=json&limit=6&addressdetails=1`,
+        `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=json&limit=10&addressdetails=1`,
         { headers: { 'User-Agent': 'TravelDiaryApp/1.0' } }
       );
       const data: NominatimResult[] = await res.json();
-      setCityResults(data);
+      setCityResults(deduplicateResults(data));
     } catch {
       setCityResults([]);
     }
@@ -67,6 +86,40 @@ export default function HomeScreen() {
     debounceTimer.current = setTimeout(() => searchCities(citySearch), 400);
     return () => { if (debounceTimer.current) clearTimeout(debounceTimer.current); };
   }, [citySearch, searchCities]);
+
+  const useMyLocation = async () => {
+    setLocating(true);
+    try {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert('Permission needed', 'Please allow location access in Settings to use this feature.');
+        setLocating(false);
+        return;
+      }
+
+      const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+      const { latitude, longitude } = loc.coords;
+
+      const res = await fetch(
+        `https://nominatim.openstreetmap.org/reverse?lat=${latitude}&lon=${longitude}&format=json&addressdetails=1`,
+        { headers: { 'User-Agent': 'TravelDiaryApp/1.0' } }
+      );
+      const data = await res.json();
+
+      const syntheticResult: NominatimResult = {
+        place_id: data.place_id,
+        display_name: data.display_name,
+        lat: String(latitude),
+        lon: String(longitude),
+        address: data.address,
+      };
+
+      await logTrip(syntheticResult);
+    } catch {
+      Alert.alert('Could not get location', 'Make sure location services are enabled.');
+    }
+    setLocating(false);
+  };
 
   const logTrip = async (result: NominatimResult) => {
     const cityName =
@@ -149,6 +202,26 @@ export default function HomeScreen() {
             </TouchableOpacity>
           </View>
 
+          {/* GPS option */}
+          <TouchableOpacity
+            style={styles.locationBtn}
+            onPress={useMyLocation}
+            disabled={locating || creatingTrip}
+          >
+            {locating ? (
+              <ActivityIndicator color="#00A699" size="small" />
+            ) : (
+              <Text style={styles.locationIcon}>📍</Text>
+            )}
+            <Text style={styles.locationBtnText}>Use My Current Location</Text>
+          </TouchableOpacity>
+
+          <View style={styles.dividerRow}>
+            <View style={styles.dividerLine} />
+            <Text style={styles.dividerText}>or search</Text>
+            <View style={styles.dividerLine} />
+          </View>
+
           <TextInput
             style={styles.cityInput}
             placeholder="Search a city or town..."
@@ -214,6 +287,21 @@ const styles = StyleSheet.create({
   },
   modalTitle: { fontSize: 20, fontWeight: 'bold' },
   cancelText: { fontSize: 16, color: '#666' },
+  locationBtn: {
+    flexDirection: 'row', alignItems: 'center',
+    marginHorizontal: 20, marginBottom: 4,
+    backgroundColor: '#F0FAFA', borderRadius: 14,
+    paddingVertical: 14, paddingHorizontal: 16,
+    borderWidth: 1, borderColor: '#C8EEEB',
+  },
+  locationIcon: { fontSize: 18, marginRight: 10 },
+  locationBtnText: { fontSize: 15, fontWeight: '600', color: '#00A699' },
+  dividerRow: {
+    flexDirection: 'row', alignItems: 'center',
+    marginHorizontal: 20, marginVertical: 14,
+  },
+  dividerLine: { flex: 1, height: 1, backgroundColor: '#eee' },
+  dividerText: { marginHorizontal: 10, fontSize: 13, color: '#aaa' },
   cityInput: {
     marginHorizontal: 20, borderWidth: 1, borderColor: '#ddd',
     borderRadius: 12, paddingVertical: 12, paddingHorizontal: 16,
