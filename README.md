@@ -1,12 +1,11 @@
 # Touri
 
-A React Native mobile application designed to log personal travels, track favorite restaurants, and pin memories on an interactive map. This updated version leverages a cloud-based backend for seamless syncing and AI to automatically analyze travel photos.
+A React Native mobile application designed to log personal travels, track favorite restaurants, and pin memories on an interactive map.
 
 ## 🗺️ Features
 
 * **Secure Authentication:** User sign-up and login managed through Supabase Auth, keeping travel data private with Row Level Security (RLS).
 * **Cloud Sync & Storage:** All trips, jots, landmarks, and photos are safely stored in a Supabase PostgreSQL database and public storage bucket, accessible across devices.
-* **AI Photo Analysis:** Upload travel photos and automatically extract recognizable landmarks, restaurant names, and descriptive tags using the Google Gemini 1.5 Flash API.
 * **Detailed City Views:** Organize your memories effortlessly using a tabbed interface for Photos, written Jots, Landmarks, and Restaurants for each trip.
 * **Interactive Global Map:** View your domestic and international travel pins on a fully interactive map interface.
 
@@ -16,14 +15,13 @@ This project is built with the following core technologies:
 
 * **Framework:** [Expo v54](https://docs.expo.dev/versions/v54.0.0/) & React Native
 * **Navigation:** `@react-navigation/native-stack` for seamless screen transitions
-* **Backend as a Service (BaaS):** Supabase for PostgreSQL database, secure authentication, and photo blob storage
-* **AI / Machine Learning:** Google Gemini API (`gemini-1.5-flash`) for intelligent image processing
+* **Backend as a Service (BaaS):** Supabase for secure user logins, saving trip data, and storing uploaded photos
 * **State Management:** React Context API for global authentication state
-* **Language:** TypeScript for type safety across components and API responses
+* **Language:** TypeScript to catch errors early and ensure our app handles data reliably
 
 ## 🏗️ Architecture Diagram
 
-The application has migrated to a cloud-first architecture, separating the client UI from the backend services and external APIs.
+The application has migrated to a cloud-first architecture from an offline-first architecture, separating the client UI from the backend services and external APIs.
 
 ```mermaid
 graph TD
