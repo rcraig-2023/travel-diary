@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   StyleSheet, View, Text, TextInput, TouchableOpacity,
-  Modal, FlatList, ActivityIndicator, Alert, Platform,
+  Modal, FlatList, ActivityIndicator, Alert, ScrollView,
 } from 'react-native';
 import MapView, { Marker } from 'react-native-maps';
 import { useNavigation } from '@react-navigation/native';
@@ -10,6 +10,7 @@ import * as Location from 'expo-location';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
 import { Trip } from '../types';
+import { formatTripDateRange, addDaysToDate } from '../utils/dateUtils';
 
 type NominatimResult = {
   place_id: number;
@@ -35,6 +36,11 @@ export default function HomeScreen() {
   const [searchQuery, setSearchQuery] = useState('');
   const [showLogModal, setShowLogModal] = useState(false);
   const [showAccountModal, setShowAccountModal] = useState(false);
+
+  // New Trip State
+  const [selectedCityResult, setSelectedCityResult] = useState<NominatimResult | null>(null);
+  const [startDate, setStartDate] = useState(new Date().toISOString().split('T')[0]);
+  const [endDate, setEndDate] = useState('');
 
   const [citySearch, setCitySearch] = useState('');
   const [cityResults, setCityResults] = useState<NominatimResult[]>([]);
@@ -170,7 +176,7 @@ export default function HomeScreen() {
                 lon: String(longitude),
                 address: data.address || {},
               };
-              logTrip(syntheticResult);
+              handleCitySelect(syntheticResult);
             },
           },
         ]
@@ -181,12 +187,21 @@ export default function HomeScreen() {
     setLocating(false);
   };
 
-  const logTrip = async (result: NominatimResult) => {
+  const handleCitySelect = (item: NominatimResult) => {
+    setSelectedCityResult(item);
+    setStartDate(new Date().toISOString().split('T')[0]);
+    setEndDate('');
+    setShowLogModal(true);
+  };
+
+  const saveNewTrip = async () => {
+    if (!selectedCityResult) return;
+
     const cityName =
-      result.address.city ||
-      result.address.town ||
-      result.address.village ||
-      result.display_name.split(',')[0].trim();
+      selectedCityResult.address.city ||
+      selectedCityResult.address.town ||
+      selectedCityResult.address.village ||
+      selectedCityResult.display_name.split(',')[0].trim();
 
     setCreatingTrip(true);
     try {
@@ -195,10 +210,11 @@ export default function HomeScreen() {
         .insert({
           user_id: user!.id,
           city_name: cityName,
-          country: result.address.country ?? null,
-          lat: parseFloat(result.lat),
-          lng: parseFloat(result.lon),
-          visit_date: new Date().toISOString().split('T')[0],
+          country: selectedCityResult.address.country ?? null,
+          lat: parseFloat(selectedCityResult.lat),
+          lng: parseFloat(selectedCityResult.lon),
+          visit_date: startDate.trim() || null,
+          end_date: endDate.trim() || null,
         })
         .select()
         .single();
@@ -259,8 +275,11 @@ export default function HomeScreen() {
 
   const closeModal = () => {
     setShowLogModal(false);
+    setSelectedCityResult(null);
     setCitySearch('');
     setCityResults([]);
+    setStartDate(new Date().toISOString().split('T')[0]);
+    setEndDate('');
   };
 
   const fitAllTrips = () => {
@@ -295,15 +314,6 @@ export default function HomeScreen() {
     t.city_name.toLowerCase().includes(searchQuery.toLowerCase()) ||
     (t.country && t.country.toLowerCase().includes(searchQuery.toLowerCase()))
   );
-
-  const formatDate = (iso: string | null) => {
-    if (!iso) return '';
-    return new Date(iso).toLocaleDateString(undefined, {
-      month: 'short',
-      day: 'numeric',
-      year: 'numeric',
-    });
-  };
 
   return (
     <View style={styles.container}>
@@ -434,7 +444,9 @@ export default function HomeScreen() {
                 <Text style={styles.previewCityName}>{selectedTrip.city_name}</Text>
                 <Text style={styles.previewCountry}>
                   {selectedTrip.country || 'Destination'}
-                  {selectedTrip.visit_date ? ` · ${formatDate(selectedTrip.visit_date)}` : ''}
+                  {selectedTrip.visit_date
+                    ? ` · ${formatTripDateRange(selectedTrip.visit_date, selectedTrip.end_date)}`
+                    : ''}
                 </Text>
               </View>
               <TouchableOpacity
@@ -475,7 +487,10 @@ export default function HomeScreen() {
           <TouchableOpacity
             style={styles.logTripButton}
             activeOpacity={0.85}
-            onPress={() => setShowLogModal(true)}
+            onPress={() => {
+              setSelectedCityResult(null);
+              setShowLogModal(true);
+            }}
           >
             <Text style={styles.logTripButtonIcon}>＋</Text>
             <Text style={styles.logTripButtonText}>Log New Trip</Text>
@@ -531,7 +546,7 @@ export default function HomeScreen() {
                   >
                     <Text style={styles.tripManageName}>📍 {item.city_name}</Text>
                     <Text style={styles.tripManageSub}>
-                      {item.country || 'Trip'} · {formatDate(item.visit_date)}
+                      {item.country || 'Trip'} · {formatTripDateRange(item.visit_date, item.end_date)}
                     </Text>
                   </TouchableOpacity>
                   <TouchableOpacity
@@ -560,7 +575,7 @@ export default function HomeScreen() {
         </TouchableOpacity>
       </Modal>
 
-      {/* Log Trip Modal */}
+      {/* Log Trip Modal (Step 1: City Search, Step 2: Date & Duration Selector) */}
       <Modal
         visible={showLogModal}
         animationType="slide"
@@ -569,52 +584,232 @@ export default function HomeScreen() {
       >
         <View style={styles.modal}>
           <View style={styles.modalHeader}>
-            <Text style={styles.modalTitle}>Where did you travel?</Text>
+            <Text style={styles.modalTitle}>
+              {selectedCityResult ? 'Trip Dates & Duration' : 'Where did you travel?'}
+            </Text>
             <TouchableOpacity onPress={closeModal}>
               <Text style={styles.cancelText}>Cancel</Text>
             </TouchableOpacity>
           </View>
 
-          <TextInput
-            style={styles.cityInput}
-            placeholder="Search a city (e.g. Paris, Tokyo, Berlin)..."
-            placeholderTextColor="#999"
-            value={citySearch}
-            onChangeText={setCitySearch}
-            autoFocus
-          />
+          {selectedCityResult ? (
+            /* Step 2: Configure Dates & Duration */
+            <ScrollView
+              style={styles.dateStepContainer}
+              keyboardShouldPersistTaps="handled"
+            >
+              <View style={styles.selectedCityBanner}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.selectedCityBannerTitle}>
+                    📍{' '}
+                    {selectedCityResult.address.city ||
+                      selectedCityResult.address.town ||
+                      selectedCityResult.address.village ||
+                      selectedCityResult.display_name.split(',')[0]}
+                  </Text>
+                  <Text style={styles.selectedCityBannerCountry} numberOfLines={1}>
+                    {selectedCityResult.address.country || selectedCityResult.display_name}
+                  </Text>
+                </View>
+                <TouchableOpacity
+                  style={styles.changeCityBtn}
+                  onPress={() => setSelectedCityResult(null)}
+                >
+                  <Text style={styles.changeCityBtnText}>Change</Text>
+                </TouchableOpacity>
+              </View>
 
-          {(searchLoading || creatingTrip) && (
-            <ActivityIndicator style={styles.spinner} color="#000" />
-          )}
+              {/* Live Formatted Summary */}
+              <View style={styles.previewDurationBox}>
+                <Text style={styles.previewDurationLabel}>TRIP DURATION PREVIEW</Text>
+                <Text style={styles.previewDurationValue}>
+                  🗓️ {formatTripDateRange(startDate, endDate) || 'Set your travel dates'}
+                </Text>
+              </View>
 
-          <FlatList
-            data={cityResults}
-            keyExtractor={(item) => item.place_id.toString()}
-            keyboardShouldPersistTaps="handled"
-            renderItem={({ item }) => (
+              {/* Start Date */}
+              <Text style={styles.inputLabel}>START DATE</Text>
+              <TextInput
+                style={styles.dateInput}
+                placeholder="YYYY-MM-DD (e.g. 2024-05-12)"
+                placeholderTextColor="#999"
+                value={startDate}
+                onChangeText={setStartDate}
+              />
+
+              {/* End Date */}
+              <Text style={styles.inputLabel}>END DATE (OPTIONAL FOR MULTI-DAY)</Text>
+              <TextInput
+                style={styles.dateInput}
+                placeholder="YYYY-MM-DD (e.g. 2024-05-19)"
+                placeholderTextColor="#999"
+                value={endDate}
+                onChangeText={setEndDate}
+              />
+
+              {/* Quick Duration Helper Chips */}
+              <Text style={styles.inputLabel}>QUICK DURATION PRESETS</Text>
+              <View style={styles.durationChipGrid}>
+                <TouchableOpacity
+                  style={styles.durationChip}
+                  onPress={() => {
+                    setEndDate(startDate);
+                  }}
+                >
+                  <Text style={styles.durationChipText}>⚡ 1 Day</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.durationChip}
+                  onPress={() => {
+                    setEndDate(addDaysToDate(startDate, 2));
+                  }}
+                >
+                  <Text style={styles.durationChipText}>🗓️ Weekend (3 Days)</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.durationChip}
+                  onPress={() => {
+                    setEndDate(addDaysToDate(startDate, 6));
+                  }}
+                >
+                  <Text style={styles.durationChipText}>✈️ 1 Week (7 Days)</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.durationChip}
+                  onPress={() => {
+                    setEndDate(addDaysToDate(startDate, 13));
+                  }}
+                >
+                  <Text style={styles.durationChipText}>🏖️ 2 Weeks (14 Days)</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.durationChip}
+                  onPress={() => {
+                    setEndDate(addDaysToDate(startDate, 29));
+                  }}
+                >
+                  <Text style={styles.durationChipText}>🌍 1 Month</Text>
+                </TouchableOpacity>
+                {endDate ? (
+                  <TouchableOpacity
+                    style={[styles.durationChip, styles.durationChipClear]}
+                    onPress={() => setEndDate('')}
+                  >
+                    <Text style={styles.durationChipClearText}>Clear End Date</Text>
+                  </TouchableOpacity>
+                ) : null}
+              </View>
+
+              {/* Past Trip Presets */}
+              <Text style={styles.inputLabel}>PAST TRIP PRESETS</Text>
+              <View style={styles.durationChipGrid}>
+                <TouchableOpacity
+                  style={styles.durationChip}
+                  onPress={() => {
+                    const today = new Date();
+                    setStartDate(today.toISOString().split('T')[0]);
+                    setEndDate('');
+                  }}
+                >
+                  <Text style={styles.durationChipText}>📍 Today</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.durationChip}
+                  onPress={() => {
+                    const d = new Date();
+                    d.setMonth(d.getMonth() - 1);
+                    const y = d.getFullYear();
+                    const m = String(d.getMonth() + 1).padStart(2, '0');
+                    setStartDate(`${y}-${m}-01`);
+                    setEndDate(`${y}-${m}-28`);
+                  }}
+                >
+                  <Text style={styles.durationChipText}>📅 Last Month</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.durationChip}
+                  onPress={() => {
+                    const prevYear = new Date().getFullYear() - 1;
+                    setStartDate(`${prevYear}-06-01`);
+                    setEndDate(`${prevYear}-06-15`);
+                  }}
+                >
+                  <Text style={styles.durationChipText}>📅 Last Year ({new Date().getFullYear() - 1})</Text>
+                </TouchableOpacity>
+              </View>
+
+              {/* Submit Button */}
               <TouchableOpacity
-                style={styles.cityResult}
-                onPress={() => logTrip(item)}
-                disabled={creatingTrip}
+                style={[
+                  styles.saveTripBtn,
+                  (!startDate.trim() || creatingTrip) && styles.saveTripBtnDisabled,
+                ]}
+                onPress={saveNewTrip}
+                disabled={!startDate.trim() || creatingTrip}
+                activeOpacity={0.85}
               >
-                <Text style={styles.cityResultName}>
-                  {item.address.city ||
-                    item.address.town ||
-                    item.address.village ||
-                    item.display_name.split(',')[0]}
-                </Text>
-                <Text style={styles.cityResultSub} numberOfLines={1}>
-                  {item.display_name}
-                </Text>
+                {creatingTrip ? (
+                  <ActivityIndicator color="#fff" />
+                ) : (
+                  <Text style={styles.saveTripBtnText}>Log Trip & Open Diary →</Text>
+                )}
               </TouchableOpacity>
-            )}
-            ListEmptyComponent={
-              citySearch.length >= 2 && !searchLoading ? (
-                <Text style={styles.noResults}>No matching cities found.</Text>
-              ) : null
-            }
-          />
+            </ScrollView>
+          ) : (
+            /* Step 1: City Search */
+            <>
+              <TextInput
+                style={styles.cityInput}
+                placeholder="Search a city (e.g. Paris, Tokyo, Berlin)..."
+                placeholderTextColor="#999"
+                value={citySearch}
+                onChangeText={setCitySearch}
+                autoFocus
+              />
+
+              {(searchLoading || creatingTrip) && (
+                <ActivityIndicator style={styles.spinner} color="#000" />
+              )}
+
+              <FlatList
+                data={cityResults}
+                keyExtractor={(item) => item.place_id.toString()}
+                keyboardShouldPersistTaps="handled"
+                renderItem={({ item }) => (
+                  <TouchableOpacity
+                    style={styles.cityResult}
+                    onPress={() => handleCitySelect(item)}
+                    disabled={creatingTrip}
+                  >
+                    <View style={styles.cityResultLeft}>
+                      <Text style={styles.cityResultName}>
+                        {item.address.city ||
+                          item.address.town ||
+                          item.address.village ||
+                          item.display_name.split(',')[0]}
+                      </Text>
+                      <Text style={styles.cityResultSub} numberOfLines={1}>
+                        {item.display_name}
+                      </Text>
+                    </View>
+                    <Text style={styles.cityResultArrow}>→</Text>
+                  </TouchableOpacity>
+                )}
+                ListEmptyComponent={
+                  citySearch.length >= 2 && !searchLoading ? (
+                    <Text style={styles.noResults}>No matching cities found.</Text>
+                  ) : (
+                    <View style={styles.searchEmptyTip}>
+                      <Text style={styles.searchEmptyTipIcon}>🗺️</Text>
+                      <Text style={styles.searchEmptyTipText}>
+                        Type a city name above to log your past or current travels.
+                      </Text>
+                    </View>
+                  )
+                }
+              />
+            </>
+          )}
         </View>
       </Modal>
     </View>
@@ -983,12 +1178,132 @@ const styles = StyleSheet.create({
   },
   spinner: { marginTop: 20 },
   cityResult: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
     paddingVertical: 14,
     paddingHorizontal: 20,
     borderBottomWidth: 1,
     borderBottomColor: '#F3F4F6',
   },
+  cityResultLeft: { flex: 1 },
   cityResultName: { fontSize: 16, fontWeight: '600', color: '#111', marginBottom: 2 },
   cityResultSub: { fontSize: 13, color: '#6B7280' },
+  cityResultArrow: { fontSize: 18, color: '#9CA3AF', marginLeft: 10 },
   noResults: { textAlign: 'center', color: '#9CA3AF', marginTop: 30, fontSize: 15 },
+  searchEmptyTip: { alignItems: 'center', marginTop: 40, paddingHorizontal: 30 },
+  searchEmptyTipIcon: { fontSize: 40, marginBottom: 10 },
+  searchEmptyTipText: { textAlign: 'center', color: '#888', fontSize: 14, lineHeight: 20 },
+
+  // Date Step Styles
+  dateStepContainer: { flex: 1, paddingHorizontal: 20 },
+  selectedCityBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F3F4F6',
+    borderRadius: 16,
+    padding: 16,
+    marginBottom: 16,
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+  },
+  selectedCityBannerTitle: { fontSize: 18, fontWeight: '800', color: '#111' },
+  selectedCityBannerCountry: { fontSize: 13, color: '#6B7280', marginTop: 2 },
+  changeCityBtn: {
+    backgroundColor: '#fff',
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+  },
+  changeCityBtnText: { fontSize: 13, color: '#374151', fontWeight: '600' },
+  previewDurationBox: {
+    backgroundColor: '#EFF6FF',
+    borderRadius: 14,
+    padding: 14,
+    marginBottom: 20,
+    borderWidth: 1,
+    borderColor: '#DBEAFE',
+  },
+  previewDurationLabel: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#1D4ED8',
+    letterSpacing: 0.5,
+    marginBottom: 4,
+  },
+  previewDurationValue: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#1E40AF',
+  },
+  inputLabel: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#374151',
+    marginBottom: 6,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  dateInput: {
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+    borderRadius: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    fontSize: 15,
+    color: '#111',
+    backgroundColor: '#FAFAFA',
+    marginBottom: 16,
+  },
+  durationChipGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginBottom: 18,
+  },
+  durationChip: {
+    backgroundColor: '#F3F4F6',
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+  },
+  durationChipText: {
+    fontSize: 13,
+    color: '#374151',
+    fontWeight: '600',
+  },
+  durationChipClear: {
+    backgroundColor: '#FEE2E2',
+    borderColor: '#FECACA',
+  },
+  durationChipClearText: {
+    fontSize: 13,
+    color: '#DC2626',
+    fontWeight: '600',
+  },
+  saveTripBtn: {
+    backgroundColor: '#111827',
+    paddingVertical: 16,
+    borderRadius: 30,
+    alignItems: 'center',
+    marginTop: 10,
+    marginBottom: 40,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.2,
+    shadowRadius: 8,
+    elevation: 4,
+  },
+  saveTripBtnDisabled: {
+    backgroundColor: '#9CA3AF',
+  },
+  saveTripBtnText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '700',
+  },
 });

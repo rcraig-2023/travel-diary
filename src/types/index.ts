@@ -6,6 +6,7 @@ export type Trip = {
   lat: number;
   lng: number;
   visit_date: string | null;
+  end_date?: string | null;
   cover_photo_url: string | null;
   created_at: string;
 };
@@ -53,6 +54,7 @@ export type Restaurant = {
   notes: string | null;
   cuisine: string | null;
   recommended?: boolean | null;
+  visit_date?: string | null;
   source: 'manual' | 'ai';
   created_at: string;
 };

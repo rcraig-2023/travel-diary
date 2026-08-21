@@ -112,6 +112,7 @@ export default function RestaurantsTab({ tripId, cityName, country }: Props) {
   const [newNotes, setNewNotes] = useState('');
   const [newCuisine, setNewCuisine] = useState('');
   const [newRecommended, setNewRecommended] = useState(false);
+  const [newVisitDate, setNewVisitDate] = useState('');
 
   const [detecting, setDetecting] = useState(false);
   const [detectionNote, setDetectionNote] = useState<string | null>(null);
@@ -216,6 +217,7 @@ export default function RestaurantsTab({ tripId, cityName, country }: Props) {
 
   const openAddModal = () => {
     resetForm();
+    setNewVisitDate(new Date().toISOString().split('T')[0]);
     setShowModal(true);
   };
 
@@ -226,6 +228,7 @@ export default function RestaurantsTab({ tripId, cityName, country }: Props) {
     setNewNotes(item.notes || '');
     setNewCuisine(item.cuisine || '');
     setNewRecommended(!!item.recommended);
+    setNewVisitDate(item.visit_date || '');
     setDetectionNote(null);
     setShowModal(true);
   };
@@ -244,6 +247,7 @@ export default function RestaurantsTab({ tripId, cityName, country }: Props) {
             notes: newNotes.trim() || null,
             cuisine: newCuisine.trim() || null,
             recommended: newRecommended,
+            visit_date: newVisitDate.trim() || null,
           })
           .eq('id', editingRestaurant.id);
 
@@ -262,6 +266,7 @@ export default function RestaurantsTab({ tripId, cityName, country }: Props) {
                   notes: newNotes.trim() || null,
                   cuisine: newCuisine.trim() || null,
                   recommended: newRecommended,
+                  visit_date: newVisitDate.trim() || null,
                 }
               : r
           )
@@ -278,6 +283,7 @@ export default function RestaurantsTab({ tripId, cityName, country }: Props) {
             notes: newNotes.trim() || null,
             cuisine: newCuisine.trim() || null,
             recommended: newRecommended,
+            visit_date: newVisitDate.trim() || null,
             source: 'manual',
           })
           .select()
@@ -309,6 +315,7 @@ export default function RestaurantsTab({ tripId, cityName, country }: Props) {
     setNewNotes('');
     setNewCuisine('');
     setNewRecommended(false);
+    setNewVisitDate('');
     setDetectionNote(null);
   };
 
@@ -327,6 +334,21 @@ export default function RestaurantsTab({ tripId, cityName, country }: Props) {
         },
       },
     ]);
+  };
+
+  const formatCardDate = (iso: string | null | undefined) => {
+    if (!iso) return '';
+    try {
+      const d = new Date(iso);
+      if (isNaN(d.getTime())) return iso;
+      return d.toLocaleDateString(undefined, {
+        month: 'short',
+        day: 'numeric',
+        year: 'numeric',
+      });
+    } catch {
+      return iso;
+    }
   };
 
   const renderStars = (rating: number | null) => {
@@ -378,11 +400,18 @@ export default function RestaurantsTab({ tripId, cityName, country }: Props) {
               </View>
             </View>
 
-            {item.cuisine ? (
-              <View style={styles.cuisineBadge}>
-                <Text style={styles.cuisineBadgeText}>{item.cuisine}</Text>
-              </View>
-            ) : null}
+            <View style={styles.badgeRow}>
+              {item.cuisine ? (
+                <View style={styles.cuisineBadge}>
+                  <Text style={styles.cuisineBadgeText}>{item.cuisine}</Text>
+                </View>
+              ) : null}
+              {item.visit_date ? (
+                <View style={styles.dateBadge}>
+                  <Text style={styles.dateBadgeText}>📅 {formatCardDate(item.visit_date)}</Text>
+                </View>
+              ) : null}
+            </View>
 
             {renderStars(item.rating)}
             {item.notes ? <Text style={styles.notes}>{item.notes}</Text> : null}
@@ -508,6 +537,42 @@ export default function RestaurantsTab({ tripId, cityName, country }: Props) {
               </Text>
             </TouchableOpacity>
 
+            {/* Visit Date */}
+            <Text style={styles.label}>VISIT DATE</Text>
+            <TextInput
+              style={styles.input}
+              placeholder="YYYY-MM-DD (e.g. 2026-08-21)"
+              placeholderTextColor="#999"
+              value={newVisitDate}
+              onChangeText={setNewVisitDate}
+            />
+            <View style={styles.quickDateRow}>
+              <TouchableOpacity
+                style={styles.quickDateChip}
+                onPress={() => setNewVisitDate(new Date().toISOString().split('T')[0])}
+              >
+                <Text style={styles.quickDateChipText}>📍 Today</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.quickDateChip}
+                onPress={() => {
+                  const yesterday = new Date();
+                  yesterday.setDate(yesterday.getDate() - 1);
+                  setNewVisitDate(yesterday.toISOString().split('T')[0]);
+                }}
+              >
+                <Text style={styles.quickDateChipText}>🗓️ Yesterday</Text>
+              </TouchableOpacity>
+              {newVisitDate ? (
+                <TouchableOpacity
+                  style={[styles.quickDateChip, styles.quickDateChipClear]}
+                  onPress={() => setNewVisitDate('')}
+                >
+                  <Text style={styles.quickDateChipClearText}>Clear</Text>
+                </TouchableOpacity>
+              ) : null}
+            </View>
+
             <Text style={styles.label}>RATING</Text>
             <View style={styles.starPicker}>
               {STARS.map((s) => (
@@ -629,9 +694,14 @@ const styles = StyleSheet.create({
     color: '#137333',
     fontWeight: '700',
   },
+  badgeRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginTop: 8,
+  },
   cuisineBadge: {
     alignSelf: 'flex-start',
-    marginTop: 8,
     backgroundColor: '#F0FAFA',
     borderRadius: 20,
     paddingVertical: 4,
@@ -640,6 +710,33 @@ const styles = StyleSheet.create({
     borderColor: '#C8EEEB',
   },
   cuisineBadgeText: { fontSize: 13, color: '#00A699', fontWeight: '600' },
+  dateBadge: {
+    alignSelf: 'flex-start',
+    backgroundColor: '#F3F4F6',
+    borderRadius: 20,
+    paddingVertical: 4,
+    paddingHorizontal: 10,
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+  },
+  dateBadgeText: { fontSize: 12, color: '#4B5563', fontWeight: '600' },
+  quickDateRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginTop: 8,
+    marginBottom: 4,
+  },
+  quickDateChip: {
+    backgroundColor: '#F3F4F6',
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+  },
+  quickDateChipText: { fontSize: 13, color: '#374151', fontWeight: '600' },
+  quickDateChipClear: { backgroundColor: '#FEE2E2', borderColor: '#FECACA' },
+  quickDateChipClearText: { fontSize: 13, color: '#DC2626', fontWeight: '600' },
   starRow: {
     flexDirection: 'row',
     marginTop: 6,

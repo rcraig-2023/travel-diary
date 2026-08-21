@@ -9,12 +9,16 @@ create table if not exists trips (
   lat double precision not null,
   lng double precision not null,
   visit_date date,
+  end_date date,
   cover_photo_url text,
   created_at timestamptz default now()
 );
 alter table trips enable row level security;
 create policy "Users manage own trips" on trips
   for all using (auth.uid() = user_id);
+
+-- Run if trips table already exists:
+-- alter table trips add column if not exists end_date date;
 
 -- PHOTOS
 create table if not exists photos (
@@ -66,6 +70,7 @@ create table if not exists restaurants (
   notes text,
   cuisine text,
   recommended boolean default false,
+  visit_date date,
   source text default 'manual',
   created_at timestamptz default now()
 );
@@ -76,6 +81,7 @@ create policy "Users manage own restaurants" on restaurants
 -- Run these if your restaurants table already exists:
 -- alter table restaurants add column if not exists cuisine text;
 -- alter table restaurants add column if not exists recommended boolean default false;
+-- alter table restaurants add column if not exists visit_date date;
 
 -- STORAGE BUCKET
 -- Go to Storage in your Supabase dashboard and create a bucket named "photos"
