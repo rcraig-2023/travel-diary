@@ -51,6 +51,13 @@ export default function CityScreen() {
         {activeTab === 'Jots' && <JotsTab tripId={trip.id} />}
         {activeTab === 'Highlights' && <LandmarksTab tripId={trip.id} />}
         {activeTab === 'Restaurants' && (
+          <RestaurantsTab
+            tripId={trip.id}
+            cityName={trip.city_name}
+            country={trip.country}
+          />
+        )}
+      </View>
     </View>
   );
 }
