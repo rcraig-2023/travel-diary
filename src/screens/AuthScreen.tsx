@@ -17,15 +17,20 @@ export default function AuthScreen() {
       return;
     }
     setLoading(true);
-    const { error } =
-      mode === 'signin'
-        ? await supabase.auth.signInWithPassword({ email, password })
-        : await supabase.auth.signUp({ email, password });
-    setLoading(false);
-    if (error) {
-      Alert.alert('Error', error.message);
-    } else if (mode === 'signup') {
-      Alert.alert('Almost there!', 'Check your email to confirm your account, then sign in.');
+    try {
+      const { error } =
+        mode === 'signin'
+          ? await supabase.auth.signInWithPassword({ email, password })
+          : await supabase.auth.signUp({ email, password });
+      if (error) {
+        Alert.alert('Error', error.message);
+      } else if (mode === 'signup') {
+        Alert.alert('Almost there!', 'Check your email to confirm your account, then sign in.');
+      }
+    } catch (err: any) {
+      Alert.alert('Connection Error', err?.message || 'Unable to connect to Supabase. Check your network or Supabase URL in .env');
+    } finally {
+      setLoading(false);
     }
   };
 

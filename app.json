@@ -33,6 +33,12 @@
         {
           "locationWhenInUsePermission": "Travel Diary uses your location to pin the city you're currently visiting."
         }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Travel Diary accesses your photos to let you attach memories to your trips."
+        }
       ]
     ]
   }

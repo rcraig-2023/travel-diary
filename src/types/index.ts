@@ -51,6 +51,8 @@ export type Restaurant = {
   name: string;
   rating: number | null;
   notes: string | null;
+  cuisine: string | null;
+  recommended?: boolean | null;
   source: 'manual' | 'ai';
   created_at: string;
 };

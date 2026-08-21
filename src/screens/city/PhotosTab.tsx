@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import {
   View, Text, FlatList, Image, TouchableOpacity, StyleSheet,
-  ActivityIndicator, Alert, Modal, TextInput,
+  ActivityIndicator, Alert, Modal, TextInput, KeyboardAvoidingView,
+  Platform, TouchableWithoutFeedback, Keyboard,
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import * as FileSystem from 'expo-file-system/legacy';
@@ -144,7 +145,9 @@ export default function PhotosTab({ tripId }: Props) {
 
       const cachedUri = `${FileSystem.cacheDirectory}td-${inserted.id}.jpg`;
       try {
-        await FileSystem.writeAsStringAsync(cachedUri, asset.base64, { encoding: 'base64' });
+        if (asset.base64) {
+          await FileSystem.writeAsStringAsync(cachedUri, asset.base64, { encoding: 'base64' });
+        }
       } catch (e) {
         console.log('[Photos] cache write failed', e);
       }
@@ -264,8 +267,19 @@ export default function PhotosTab({ tripId }: Props) {
         </TouchableOpacity>
       </View>
 
-      <Modal visible={showLabelModal} animationType="slide" transparent>
-        <View style={styles.suggestionOverlay}>
+      <Modal
+        visible={showLabelModal}
+        animationType="slide"
+        transparent
+        onRequestClose={cancelUpload}
+      >
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          style={styles.suggestionOverlay}
+        >
+          <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
+            <View style={styles.modalBackdrop} />
+          </TouchableWithoutFeedback>
           <View style={styles.suggestionSheet}>
             <Text style={styles.suggestionTitle}>Add a label (optional)</Text>
             <Text style={styles.suggestionSub}>e.g. "Eiffel Tower" — appears in Highlights as visited</Text>
@@ -286,7 +300,7 @@ export default function PhotosTab({ tripId }: Props) {
               <Text style={styles.dismissText}>Cancel</Text>
             </TouchableOpacity>
           </View>
-        </View>
+        </KeyboardAvoidingView>
       </Modal>
     </View>
   );
@@ -334,9 +348,10 @@ const styles = StyleSheet.create({
   addButtonText: { color: '#fff', fontSize: 17, fontWeight: 'bold' },
   uploadingRow: { flexDirection: 'row', alignItems: 'center' },
   suggestionOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', justifyContent: 'flex-end' },
+  modalBackdrop: { flex: 1 },
   suggestionSheet: {
     backgroundColor: '#fff', borderTopLeftRadius: 20, borderTopRightRadius: 20,
-    padding: 24, paddingBottom: 40,
+    padding: 24, paddingBottom: Platform.OS === 'ios' ? 40 : 24,
   },
   suggestionTitle: { fontSize: 18, fontWeight: 'bold', marginBottom: 4 },
   suggestionSub: { fontSize: 14, color: '#888', marginBottom: 20 },

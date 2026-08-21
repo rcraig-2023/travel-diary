@@ -41,11 +41,15 @@ export default function HomeScreen() {
   }, []);
 
   const fetchTrips = async () => {
-    const { data, error } = await supabase
-      .from('trips')
-      .select('*')
-      .order('created_at', { ascending: false });
-    if (!error && data) setTrips(data as Trip[]);
+    try {
+      const { data, error } = await supabase
+        .from('trips')
+        .select('*')
+        .order('created_at', { ascending: false });
+      if (!error && data) setTrips(data as Trip[]);
+    } catch (e) {
+      console.warn('fetchTrips error:', e);
+    }
   };
 
   const deduplicateResults = (results: NominatimResult[]): NominatimResult[] => {

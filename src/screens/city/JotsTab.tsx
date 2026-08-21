@@ -1,7 +1,7 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View, Text, FlatList, TextInput, TouchableOpacity,
-  StyleSheet, KeyboardAvoidingView, Platform, Alert,
+  StyleSheet, Platform, Alert, Keyboard, KeyboardEvent,
 } from 'react-native';
 import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../context/AuthContext';
@@ -14,11 +14,17 @@ export default function JotsTab({ tripId }: Props) {
   const [jots, setJots] = useState<Jot[]>([]);
   const [text, setText] = useState('');
   const [saving, setSaving] = useState(false);
-  const listRef = useRef<FlatList>(null);
+  const [kbHeight, setKbHeight] = useState(0);
 
   useEffect(() => {
     fetchJots();
   }, [tripId]);
+
+  useEffect(() => {
+    const show = Keyboard.addListener('keyboardWillShow', (e: KeyboardEvent) => setKbHeight(e.endCoordinates.height));
+    const hide = Keyboard.addListener('keyboardWillHide', () => setKbHeight(0));
+    return () => { show.remove(); hide.remove(); };
+  }, []);
 
   const fetchJots = async () => {
     const { data, error } = await supabase
@@ -54,13 +60,8 @@ export default function JotsTab({ tripId }: Props) {
   };
 
   return (
-    <KeyboardAvoidingView
-      style={styles.container}
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-      keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}
-    >
+    <View style={styles.container}>
       <FlatList
-        ref={listRef}
         data={jots}
         keyExtractor={(item) => item.id}
         contentContainerStyle={styles.list}
@@ -83,7 +84,7 @@ export default function JotsTab({ tripId }: Props) {
         }
       />
 
-      <View style={styles.inputDock}>
+      <View style={[styles.inputDock, { marginBottom: kbHeight }]}>
         <TextInput
           style={styles.input}
           placeholder="Write a jot about this trip..."
@@ -102,13 +103,13 @@ export default function JotsTab({ tripId }: Props) {
           <Text style={styles.sendText}>Save</Text>
         </TouchableOpacity>
       </View>
-    </KeyboardAvoidingView>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#fff' },
-  list: { padding: 16 },
+  list: { padding: 16, paddingBottom: 8 },
   jot: {
     backgroundColor: '#FFFBF0',
     borderRadius: 14,
@@ -127,7 +128,7 @@ const styles = StyleSheet.create({
     alignItems: 'flex-end',
     paddingHorizontal: 16,
     paddingTop: 12,
-    paddingBottom: Platform.OS === 'ios' ? 24 : 16,
+    paddingBottom: Platform.OS === 'ios' ? 16 : 12,
     borderTopWidth: 1,
     borderTopColor: '#f0f0f0',
     backgroundColor: '#fff',

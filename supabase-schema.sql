@@ -64,12 +64,18 @@ create table if not exists restaurants (
   name text not null,
   rating integer check (rating between 1 and 5),
   notes text,
+  cuisine text,
+  recommended boolean default false,
   source text default 'manual',
   created_at timestamptz default now()
 );
 alter table restaurants enable row level security;
 create policy "Users manage own restaurants" on restaurants
   for all using (auth.uid() = user_id);
+
+-- Run these if your restaurants table already exists:
+-- alter table restaurants add column if not exists cuisine text;
+-- alter table restaurants add column if not exists recommended boolean default false;
 
 -- STORAGE BUCKET
 -- Go to Storage in your Supabase dashboard and create a bucket named "photos"
