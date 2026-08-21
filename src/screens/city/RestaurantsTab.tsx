@@ -104,12 +104,15 @@ const formatCuisineTag = (raw: string): string => {
 export default function RestaurantsTab({ tripId, cityName, country }: Props) {
   const { user } = useAuth();
   const [restaurants, setRestaurants] = useState<Restaurant[]>([]);
-  const [showAdd, setShowAdd] = useState(false);
+  const [showModal, setShowModal] = useState(false);
+  const [editingRestaurant, setEditingRestaurant] = useState<Restaurant | null>(null);
+
   const [newName, setNewName] = useState('');
   const [newRating, setNewRating] = useState(0);
   const [newNotes, setNewNotes] = useState('');
   const [newCuisine, setNewCuisine] = useState('');
   const [newRecommended, setNewRecommended] = useState(false);
+
   const [detecting, setDetecting] = useState(false);
   const [detectionNote, setDetectionNote] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -202,7 +205,7 @@ export default function RestaurantsTab({ tripId, cityName, country }: Props) {
     setNewName(text);
     if (searchDebounce.current) clearTimeout(searchDebounce.current);
 
-    if (text.trim().length >= 2) {
+    if (text.trim().length >= 2 && !editingRestaurant) {
       searchDebounce.current = setTimeout(() => {
         detectCuisineForName(text);
       }, 500);
@@ -211,35 +214,96 @@ export default function RestaurantsTab({ tripId, cityName, country }: Props) {
     }
   };
 
+  const openAddModal = () => {
+    resetForm();
+    setShowModal(true);
+  };
+
+  const openEditModal = (item: Restaurant) => {
+    setEditingRestaurant(item);
+    setNewName(item.name);
+    setNewRating(item.rating || 0);
+    setNewNotes(item.notes || '');
+    setNewCuisine(item.cuisine || '');
+    setNewRecommended(!!item.recommended);
+    setDetectionNote(null);
+    setShowModal(true);
+  };
+
   const saveRestaurant = async () => {
     if (!newName.trim()) return;
     setSaving(true);
     try {
-      const { error } = await supabase.from('restaurants').insert({
-        trip_id: tripId,
-        user_id: user!.id,
-        name: newName.trim(),
-        rating: newRating || null,
-        notes: newNotes.trim() || null,
-        cuisine: newCuisine.trim() || null,
-        recommended: newRecommended,
-        source: 'manual',
-      });
-      if (error) {
-        Alert.alert('Error', error.message);
-        return;
+      if (editingRestaurant) {
+        // UPDATE existing review
+        const { error } = await supabase
+          .from('restaurants')
+          .update({
+            name: newName.trim(),
+            rating: newRating || null,
+            notes: newNotes.trim() || null,
+            cuisine: newCuisine.trim() || null,
+            recommended: newRecommended,
+          })
+          .eq('id', editingRestaurant.id);
+
+        if (error) {
+          Alert.alert('Update Failed', error.message);
+          return;
+        }
+
+        setRestaurants((prev) =>
+          prev.map((r) =>
+            r.id === editingRestaurant.id
+              ? {
+                  ...r,
+                  name: newName.trim(),
+                  rating: newRating || null,
+                  notes: newNotes.trim() || null,
+                  cuisine: newCuisine.trim() || null,
+                  recommended: newRecommended,
+                }
+              : r
+          )
+        );
+      } else {
+        // INSERT new review
+        const { data, error } = await supabase
+          .from('restaurants')
+          .insert({
+            trip_id: tripId,
+            user_id: user!.id,
+            name: newName.trim(),
+            rating: newRating || null,
+            notes: newNotes.trim() || null,
+            cuisine: newCuisine.trim() || null,
+            recommended: newRecommended,
+            source: 'manual',
+          })
+          .select()
+          .single();
+
+        if (error) {
+          Alert.alert('Error', error.message);
+          return;
+        }
+        if (data) {
+          setRestaurants((prev) => [...prev, data as Restaurant]);
+        }
       }
+
       resetForm();
       fetchRestaurants();
     } catch (err: any) {
-      Alert.alert('Save Failed', err.message || 'Unable to save restaurant.');
+      Alert.alert('Save Failed', err.message || 'Unable to save restaurant review.');
     } finally {
       setSaving(false);
     }
   };
 
   const resetForm = () => {
-    setShowAdd(false);
+    setShowModal(false);
+    setEditingRestaurant(null);
     setNewName('');
     setNewRating(0);
     setNewNotes('');
@@ -249,7 +313,7 @@ export default function RestaurantsTab({ tripId, cityName, country }: Props) {
   };
 
   const deleteRestaurant = async (id: string) => {
-    Alert.alert('Delete Restaurant', 'Are you sure you want to remove this restaurant?', [
+    Alert.alert('Delete Restaurant', 'Are you sure you want to remove this restaurant review?', [
       { text: 'Cancel', style: 'cancel' },
       {
         text: 'Delete',
@@ -257,6 +321,9 @@ export default function RestaurantsTab({ tripId, cityName, country }: Props) {
         onPress: async () => {
           await supabase.from('restaurants').delete().eq('id', id);
           setRestaurants((prev) => prev.filter((r) => r.id !== id));
+          if (editingRestaurant?.id === id) {
+            resetForm();
+          }
         },
       },
     ]);
@@ -264,7 +331,12 @@ export default function RestaurantsTab({ tripId, cityName, country }: Props) {
 
   const renderStars = (rating: number | null) => {
     if (!rating) return null;
-    return <Text style={styles.stars}>{'★'.repeat(rating)}{'☆'.repeat(5 - rating)}</Text>;
+    return (
+      <View style={styles.starRow}>
+        <Text style={styles.stars}>{'★'.repeat(rating)}</Text>
+        <Text style={styles.starsEmpty}>{'★'.repeat(5 - rating)}</Text>
+      </View>
+    );
   };
 
   return (
@@ -274,7 +346,11 @@ export default function RestaurantsTab({ tripId, cityName, country }: Props) {
         keyExtractor={(item) => item.id}
         contentContainerStyle={styles.list}
         renderItem={({ item }) => (
-          <View style={styles.card}>
+          <TouchableOpacity
+            style={styles.card}
+            activeOpacity={0.7}
+            onPress={() => openEditModal(item)}
+          >
             <View style={styles.cardHeader}>
               <View style={styles.nameRow}>
                 <Text style={styles.cardName}>{item.name}</Text>
@@ -284,9 +360,22 @@ export default function RestaurantsTab({ tripId, cityName, country }: Props) {
                   </View>
                 )}
               </View>
-              <TouchableOpacity onPress={() => deleteRestaurant(item.id)}>
-                <Text style={styles.deleteText}>✕</Text>
-              </TouchableOpacity>
+              <View style={styles.actionRow}>
+                <TouchableOpacity
+                  style={styles.editIconBtn}
+                  onPress={() => openEditModal(item)}
+                  hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                >
+                  <Text style={styles.editText}>✎ Edit</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.deleteIconBtn}
+                  onPress={() => deleteRestaurant(item.id)}
+                  hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                >
+                  <Text style={styles.deleteText}>✕</Text>
+                </TouchableOpacity>
+              </View>
             </View>
 
             {item.cuisine ? (
@@ -298,25 +387,31 @@ export default function RestaurantsTab({ tripId, cityName, country }: Props) {
             {renderStars(item.rating)}
             {item.notes ? <Text style={styles.notes}>{item.notes}</Text> : null}
             {item.source === 'ai' && <Text style={styles.aiBadge}>AI detected</Text>}
-          </View>
+          </TouchableOpacity>
         )}
         ListEmptyComponent={
-          <Text style={styles.emptyText}>
-            No restaurants yet. Add one below to track your favorite food spots.
-          </Text>
+          <View style={styles.emptyContainer}>
+            <Text style={styles.emptyIcon}>🍽️</Text>
+            <Text style={styles.emptyTitle}>No restaurants added yet</Text>
+            <Text style={styles.emptyText}>
+              Log the cafes, bars, and restaurants you've visited on this trip.
+            </Text>
+          </View>
         }
       />
 
       <View style={styles.bottomDock}>
-        <TouchableOpacity style={styles.addButton} onPress={() => setShowAdd(true)}>
+        <TouchableOpacity style={styles.addButton} activeOpacity={0.85} onPress={openAddModal}>
           <Text style={styles.addButtonText}>+ Add Restaurant</Text>
         </TouchableOpacity>
       </View>
 
-      <Modal visible={showAdd} animationType="slide" presentationStyle="pageSheet">
+      <Modal visible={showModal} animationType="slide" presentationStyle="pageSheet">
         <View style={styles.modal}>
           <View style={styles.modalHeader}>
-            <Text style={styles.modalTitle}>Add Restaurant</Text>
+            <Text style={styles.modalTitle}>
+              {editingRestaurant ? 'Edit Restaurant Review' : 'Add Restaurant'}
+            </Text>
             <TouchableOpacity onPress={resetForm}>
               <Text style={styles.cancelText}>Cancel</Text>
             </TouchableOpacity>
@@ -327,7 +422,7 @@ export default function RestaurantsTab({ tripId, cityName, country }: Props) {
             keyboardShouldPersistTaps="handled"
             contentContainerStyle={{ paddingBottom: kbHeight + 60 }}
           >
-            <Text style={styles.label}>NAME *</Text>
+            <Text style={styles.label}>RESTAURANT NAME *</Text>
             <View style={styles.inputWithSpinner}>
               <TextInput
                 style={[styles.input, { flex: 1 }]}
@@ -335,7 +430,7 @@ export default function RestaurantsTab({ tripId, cityName, country }: Props) {
                 placeholderTextColor="#999"
                 value={newName}
                 onChangeText={handleNameChange}
-                autoFocus
+                autoFocus={!editingRestaurant}
               />
               {detecting && (
                 <ActivityIndicator
@@ -429,10 +524,10 @@ export default function RestaurantsTab({ tripId, cityName, country }: Props) {
               ))}
             </View>
 
-            <Text style={styles.label}>NOTES</Text>
+            <Text style={styles.label}>NOTES & MUST-ORDER DISHES</Text>
             <TextInput
               style={[styles.input, styles.notesInput]}
-              placeholder="What did you love? Any must-order dishes?"
+              placeholder="What did you love? Any standout dishes or tips?"
               placeholderTextColor="#999"
               value={newNotes}
               onChangeText={setNewNotes}
@@ -450,9 +545,20 @@ export default function RestaurantsTab({ tripId, cityName, country }: Props) {
               {saving ? (
                 <ActivityIndicator color="#fff" />
               ) : (
-                <Text style={styles.saveBtnText}>Save Restaurant</Text>
+                <Text style={styles.saveBtnText}>
+                  {editingRestaurant ? 'Save Changes' : 'Save Restaurant'}
+                </Text>
               )}
             </TouchableOpacity>
+
+            {editingRestaurant ? (
+              <TouchableOpacity
+                style={styles.deleteReviewBtn}
+                onPress={() => deleteRestaurant(editingRestaurant.id)}
+              >
+                <Text style={styles.deleteReviewBtnText}>Delete this Review</Text>
+              </TouchableOpacity>
+            ) : null}
           </ScrollView>
         </View>
       </Modal>
@@ -461,20 +567,20 @@ export default function RestaurantsTab({ tripId, cityName, country }: Props) {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#fff' },
-  list: { padding: 16, paddingBottom: 8 },
+  container: { flex: 1, backgroundColor: '#FAFAFA' },
+  list: { padding: 16, paddingBottom: 24 },
   card: {
     backgroundColor: '#fff',
-    borderRadius: 14,
+    borderRadius: 16,
     padding: 16,
     marginBottom: 12,
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.06,
-    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.05,
+    shadowRadius: 8,
     elevation: 2,
     borderWidth: 1,
-    borderColor: '#f0f0f0',
+    borderColor: '#EEEEEE',
   },
   cardHeader: {
     flexDirection: 'row',
@@ -488,7 +594,28 @@ const styles = StyleSheet.create({
     flex: 1,
     gap: 8,
   },
-  cardName: { fontSize: 16, fontWeight: '700', color: '#111' },
+  cardName: { fontSize: 17, fontWeight: '700', color: '#111' },
+  actionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  editIconBtn: {
+    backgroundColor: '#F3F4F6',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 8,
+  },
+  editText: {
+    fontSize: 12,
+    color: '#4B5563',
+    fontWeight: '600',
+  },
+  deleteIconBtn: {
+    paddingHorizontal: 6,
+    paddingVertical: 4,
+  },
+  deleteText: { fontSize: 16, color: '#9CA3AF' },
   recommendBadge: {
     backgroundColor: '#E6F4EA',
     borderColor: '#34A853',
@@ -502,20 +629,32 @@ const styles = StyleSheet.create({
     color: '#137333',
     fontWeight: '700',
   },
-  deleteText: { fontSize: 16, color: '#ccc', paddingLeft: 10 },
   cuisineBadge: {
     alignSelf: 'flex-start',
-    marginTop: 6,
+    marginTop: 8,
     backgroundColor: '#F0FAFA',
     borderRadius: 20,
-    paddingVertical: 3,
-    paddingHorizontal: 10,
+    paddingVertical: 4,
+    paddingHorizontal: 12,
     borderWidth: 1,
     borderColor: '#C8EEEB',
   },
   cuisineBadgeText: { fontSize: 13, color: '#00A699', fontWeight: '600' },
-  stars: { fontSize: 16, color: '#FFD700', marginTop: 4 },
-  notes: { fontSize: 14, color: '#555', marginTop: 6, lineHeight: 20 },
+  starRow: {
+    flexDirection: 'row',
+    marginTop: 6,
+  },
+  stars: { fontSize: 16, color: '#FFB800' },
+  starsEmpty: { fontSize: 16, color: '#E5E7EB' },
+  notes: {
+    fontSize: 14,
+    color: '#4B5563',
+    marginTop: 8,
+    lineHeight: 20,
+    backgroundColor: '#F9FAFB',
+    padding: 10,
+    borderRadius: 10,
+  },
   aiBadge: {
     fontSize: 11,
     color: '#00A699',
@@ -523,28 +662,34 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     letterSpacing: 0.3,
   },
+  emptyContainer: {
+    alignItems: 'center',
+    paddingTop: 50,
+    paddingHorizontal: 30,
+  },
+  emptyIcon: { fontSize: 44, marginBottom: 12 },
+  emptyTitle: { fontSize: 17, fontWeight: '700', color: '#333', marginBottom: 6 },
   emptyText: {
     textAlign: 'center',
-    color: '#999',
-    marginTop: 50,
-    fontSize: 15,
-    paddingHorizontal: 30,
+    color: '#888',
+    fontSize: 14,
+    lineHeight: 20,
   },
   bottomDock: {
     paddingHorizontal: 20,
     paddingTop: 15,
-    paddingBottom: 40,
+    paddingBottom: Platform.OS === 'ios' ? 36 : 20,
     backgroundColor: '#fff',
     borderTopWidth: 1,
     borderTopColor: '#f0f0f0',
   },
   addButton: {
     backgroundColor: '#000',
-    paddingVertical: 18,
+    paddingVertical: 16,
     borderRadius: 30,
     alignItems: 'center',
   },
-  addButtonText: { color: '#fff', fontSize: 17, fontWeight: 'bold' },
+  addButtonText: { color: '#fff', fontSize: 16, fontWeight: 'bold' },
   modal: { flex: 1, backgroundColor: '#fff' },
   modalHeader: {
     flexDirection: 'row',
@@ -556,15 +701,15 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: '#f0f0f0',
   },
-  modalTitle: { fontSize: 20, fontWeight: 'bold' },
+  modalTitle: { fontSize: 19, fontWeight: 'bold', color: '#111' },
   cancelText: { fontSize: 16, color: '#666' },
   modalBody: { padding: 20 },
   label: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: '#888',
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#6B7280',
     marginBottom: 8,
-    marginTop: 16,
+    marginTop: 18,
     letterSpacing: 0.5,
   },
   inputWithSpinner: {
@@ -577,13 +722,13 @@ const styles = StyleSheet.create({
   },
   input: {
     borderWidth: 1,
-    borderColor: '#ddd',
+    borderColor: '#E5E7EB',
     borderRadius: 12,
     paddingVertical: 12,
     paddingHorizontal: 14,
     fontSize: 16,
-    color: '#000',
-    backgroundColor: '#fff',
+    color: '#111',
+    backgroundColor: '#FAFAFA',
   },
   detectionBanner: {
     backgroundColor: '#E8F5E9',
@@ -601,30 +746,30 @@ const styles = StyleSheet.create({
   chipGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   cuisineChip: {
     borderWidth: 1,
-    borderColor: '#ddd',
+    borderColor: '#E5E7EB',
     borderRadius: 20,
     paddingVertical: 7,
     paddingHorizontal: 14,
     backgroundColor: '#fff',
   },
   cuisineChipSelected: { backgroundColor: '#000', borderColor: '#000' },
-  cuisineChipText: { fontSize: 14, color: '#333' },
-  cuisineChipTextSelected: { color: '#fff' },
+  cuisineChipText: { fontSize: 14, color: '#374151' },
+  cuisineChipTextSelected: { color: '#fff', fontWeight: '600' },
   recommendRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#F9F9F9',
+    backgroundColor: '#F9FAFB',
     padding: 14,
     borderRadius: 12,
     borderWidth: 1,
-    borderColor: '#EAEAEA',
+    borderColor: '#E5E7EB',
   },
   checkbox: {
     width: 24,
     height: 24,
     borderRadius: 6,
     borderWidth: 2,
-    borderColor: '#999',
+    borderColor: '#9CA3AF',
     alignItems: 'center',
     justifyContent: 'center',
     marginRight: 10,
@@ -640,25 +785,35 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
   },
   recommendLabel: {
-    fontSize: 16,
+    fontSize: 15,
     fontWeight: '600',
     color: '#111',
   },
   recommendSub: {
     fontSize: 13,
-    color: '#888',
+    color: '#6B7280',
     marginLeft: 8,
   },
   starPicker: { flexDirection: 'row', gap: 8 },
-  starOption: { fontSize: 32, color: '#ddd' },
-  starSelected: { color: '#FFD700' },
+  starOption: { fontSize: 32, color: '#E5E7EB' },
+  starSelected: { color: '#FFB800' },
   saveBtn: {
     backgroundColor: '#000',
     paddingVertical: 16,
     borderRadius: 30,
     alignItems: 'center',
-    marginTop: 30,
+    marginTop: 26,
   },
-  saveBtnDisabled: { backgroundColor: '#ccc' },
+  saveBtnDisabled: { backgroundColor: '#D1D5DB' },
   saveBtnText: { color: '#fff', fontSize: 16, fontWeight: 'bold' },
+  deleteReviewBtn: {
+    marginTop: 14,
+    paddingVertical: 12,
+    alignItems: 'center',
+  },
+  deleteReviewBtnText: {
+    color: '#EF4444',
+    fontSize: 14,
+    fontWeight: '600',
+  },
 });

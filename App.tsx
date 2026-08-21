@@ -31,12 +31,17 @@ function AppNavigator() {
         <Stack.Screen
           name="Home"
           component={HomeScreen}
-          options={{ title: 'My Travels' }}
+          options={{ headerShown: false }}
         />
         <Stack.Screen
           name="City"
           component={CityScreen}
-          options={({ route }: any) => ({ title: route.params?.trip?.city_name ?? 'Trip' })}
+          options={({ route }: any) => ({
+            title: route.params?.trip?.city_name ?? 'Trip',
+            headerBackTitle: 'Map',
+            headerTintColor: '#000',
+            headerTitleStyle: { fontWeight: '700' },
+          })}
         />
       </Stack.Navigator>
     </NavigationContainer>
