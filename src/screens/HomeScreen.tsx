@@ -41,11 +41,16 @@ export default function HomeScreen() {
   const [searchLoading, setSearchLoading] = useState(false);
   const [creatingTrip, setCreatingTrip] = useState(false);
   const [locating, setLocating] = useState(false);
+  const [deletingTripId, setDeletingTripId] = useState<string | null>(null);
   const debounceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     fetchTrips();
-  }, []);
+    const unsubscribe = navigation.addListener('focus', () => {
+      fetchTrips();
+    });
+    return unsubscribe;
+  }, [navigation]);
 
   const fetchTrips = async () => {
     try {
@@ -105,14 +110,15 @@ export default function HomeScreen() {
     };
   }, [citySearch, searchCities]);
 
-  const useMyLocation = async () => {
+  // Center map on user's current GPS location and offer to log
+  const centerOnMyLocation = async () => {
     setLocating(true);
     try {
       const { status } = await Location.requestForegroundPermissionsAsync();
       if (status !== 'granted') {
         Alert.alert(
-          'Permission needed',
-          'Please allow location access in Settings to use this feature.'
+          'Permission Needed',
+          'Please enable location permissions in Settings to center on your position.'
         );
         setLocating(false);
         return;
@@ -123,34 +129,54 @@ export default function HomeScreen() {
       });
       const { latitude, longitude } = loc.coords;
 
-      // Animate map to current location
+      // Animate map camera to current location
       mapRef.current?.animateToRegion(
         {
           latitude,
           longitude,
-          latitudeDelta: 2,
-          longitudeDelta: 2,
+          latitudeDelta: 0.8,
+          longitudeDelta: 0.8,
         },
         700
       );
 
+      // Reverse geocode to find city name
       const res = await fetch(
         `https://nominatim.openstreetmap.org/reverse?lat=${latitude}&lon=${longitude}&format=json&addressdetails=1`,
         { headers: { 'User-Agent': 'TravelDiaryApp/1.0' } }
       );
       const data = await res.json();
 
-      const syntheticResult: NominatimResult = {
-        place_id: data.place_id,
-        display_name: data.display_name,
-        lat: String(latitude),
-        lon: String(longitude),
-        address: data.address,
-      };
+      const cityName =
+        data.address?.city ||
+        data.address?.town ||
+        data.address?.village ||
+        data.display_name?.split(',')[0] ||
+        'Current Location';
 
-      await logTrip(syntheticResult);
+      // Ask if the user wants to log this city
+      Alert.alert(
+        `📍 Located in ${cityName}`,
+        `Would you like to log ${cityName} to your travel diary?`,
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: `Log ${cityName}`,
+            onPress: () => {
+              const syntheticResult: NominatimResult = {
+                place_id: data.place_id || Date.now(),
+                display_name: data.display_name || cityName,
+                lat: String(latitude),
+                lon: String(longitude),
+                address: data.address || {},
+              };
+              logTrip(syntheticResult);
+            },
+          },
+        ]
+      );
     } catch {
-      Alert.alert('Could not get location', 'Make sure location services are enabled.');
+      Alert.alert('Location Error', 'Unable to retrieve current location.');
     }
     setLocating(false);
   };
@@ -193,6 +219,44 @@ export default function HomeScreen() {
     }
   };
 
+  const deleteTrip = (tripToDelete: Trip) => {
+    Alert.alert(
+      `Delete ${tripToDelete.city_name}?`,
+      `Are you sure you want to remove this pin? All photos, jots, and restaurant reviews for ${tripToDelete.city_name} will be deleted.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete Pin',
+          style: 'destructive',
+          onPress: async () => {
+            setDeletingTripId(tripToDelete.id);
+            try {
+              const { error } = await supabase
+                .from('trips')
+                .delete()
+                .eq('id', tripToDelete.id);
+
+              if (error) {
+                Alert.alert('Delete Failed', error.message);
+                return;
+              }
+
+              // Update local state
+              setTrips((prev) => prev.filter((t) => t.id !== tripToDelete.id));
+              if (selectedTrip?.id === tripToDelete.id) {
+                setSelectedTrip(null);
+              }
+            } catch (err: any) {
+              Alert.alert('Error', err.message || 'Failed to delete trip.');
+            } finally {
+              setDeletingTripId(null);
+            }
+          },
+        },
+      ]
+    );
+  };
+
   const closeModal = () => {
     setShowLogModal(false);
     setCitySearch('');
@@ -209,7 +273,7 @@ export default function HomeScreen() {
     }
     const coords = trips.map((t) => ({ latitude: t.lat, longitude: t.lng }));
     mapRef.current?.fitToCoordinates(coords, {
-      edgePadding: { top: 120, right: 60, bottom: 180, left: 60 },
+      edgePadding: { top: 140, right: 60, bottom: 200, left: 60 },
       animated: true,
     });
   };
@@ -332,7 +396,7 @@ export default function HomeScreen() {
         <View style={styles.statsRow}>
           <View style={styles.statsPill}>
             <Text style={styles.statsText}>
-              ✈️ {trips.length} {trips.length === 1 ? 'City' : 'Cities'} Explored
+              ✈️ {trips.length} {trips.length === 1 ? 'Pin' : 'Pins'} on Map
             </Text>
           </View>
         </View>
@@ -349,14 +413,14 @@ export default function HomeScreen() {
         </TouchableOpacity>
         <TouchableOpacity
           style={styles.mapControlBtn}
-          onPress={useMyLocation}
+          onPress={centerOnMyLocation}
           activeOpacity={0.8}
           disabled={locating}
         >
           {locating ? (
             <ActivityIndicator size="small" color="#000" />
           ) : (
-            <Text style={styles.mapControlEmoji}>📍</Text>
+            <Text style={styles.mapControlEmoji}>🎯</Text>
           )}
         </TouchableOpacity>
       </View>
@@ -364,11 +428,7 @@ export default function HomeScreen() {
       {/* Bottom Floating City Preview Card OR "+ Log Trip" Button */}
       {selectedTrip ? (
         <View style={[styles.previewContainer, { paddingBottom: insets.bottom + 16 }]}>
-          <TouchableOpacity
-            style={styles.previewCard}
-            activeOpacity={0.9}
-            onPress={() => navigation.navigate('City', { trip: selectedTrip })}
-          >
+          <View style={styles.previewCard}>
             <View style={styles.previewHeader}>
               <View style={{ flex: 1 }}>
                 <Text style={styles.previewCityName}>{selectedTrip.city_name}</Text>
@@ -386,13 +446,29 @@ export default function HomeScreen() {
               </TouchableOpacity>
             </View>
 
-            <TouchableOpacity
-              style={styles.previewActionBtn}
-              onPress={() => navigation.navigate('City', { trip: selectedTrip })}
-            >
-              <Text style={styles.previewActionBtnText}>Explore City Diary →</Text>
-            </TouchableOpacity>
-          </TouchableOpacity>
+            <View style={styles.previewActionRow}>
+              <TouchableOpacity
+                style={styles.previewActionBtn}
+                onPress={() => navigation.navigate('City', { trip: selectedTrip })}
+                activeOpacity={0.85}
+              >
+                <Text style={styles.previewActionBtnText}>Explore City Diary →</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.deletePinBtn}
+                onPress={() => deleteTrip(selectedTrip)}
+                activeOpacity={0.8}
+                disabled={deletingTripId === selectedTrip.id}
+              >
+                {deletingTripId === selectedTrip.id ? (
+                  <ActivityIndicator size="small" color="#DC2626" />
+                ) : (
+                  <Text style={styles.deletePinText}>🗑 Delete Pin</Text>
+                )}
+              </TouchableOpacity>
+            </View>
+          </View>
         </View>
       ) : (
         <View style={[styles.bottomButtonContainer, { paddingBottom: insets.bottom + 20 }]}>
@@ -407,11 +483,11 @@ export default function HomeScreen() {
         </View>
       )}
 
-      {/* Account & Profile Modal */}
+      {/* Account & Profile Modal with Trip Management */}
       <Modal
         visible={showAccountModal}
         transparent
-        animationType="fade"
+        animationType="slide"
         onRequestClose={() => setShowAccountModal(false)}
       >
         <TouchableOpacity
@@ -419,7 +495,7 @@ export default function HomeScreen() {
           activeOpacity={1}
           onPress={() => setShowAccountModal(false)}
         >
-          <View style={[styles.accountSheet, { paddingBottom: insets.bottom + 24 }]}>
+          <View style={[styles.accountSheet, { maxHeight: '80%', paddingBottom: insets.bottom + 20 }]}>
             <View style={styles.accountSheetHandle} />
             <Text style={styles.accountTitle}>Traveler Profile</Text>
             <Text style={styles.accountEmail}>{user?.email || 'Logged In'}</Text>
@@ -427,7 +503,7 @@ export default function HomeScreen() {
             <View style={styles.accountStatsCard}>
               <View style={styles.statCol}>
                 <Text style={styles.statNumber}>{trips.length}</Text>
-                <Text style={styles.statLabel}>Trips Logged</Text>
+                <Text style={styles.statLabel}>Pins Logged</Text>
               </View>
               <View style={styles.statDivider} />
               <View style={styles.statCol}>
@@ -437,6 +513,39 @@ export default function HomeScreen() {
                 <Text style={styles.statLabel}>Countries</Text>
               </View>
             </View>
+
+            {/* List of saved trips for quick pin management / deleting duplicates */}
+            <Text style={styles.sectionHeader}>Manage Your Pins ({trips.length})</Text>
+            <FlatList
+              data={trips}
+              keyExtractor={(item) => item.id}
+              style={styles.tripsList}
+              renderItem={({ item }) => (
+                <View style={styles.tripManageRow}>
+                  <TouchableOpacity
+                    style={styles.tripManageInfo}
+                    onPress={() => {
+                      setShowAccountModal(false);
+                      handleSelectTrip(item);
+                    }}
+                  >
+                    <Text style={styles.tripManageName}>📍 {item.city_name}</Text>
+                    <Text style={styles.tripManageSub}>
+                      {item.country || 'Trip'} · {formatDate(item.visit_date)}
+                    </Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={styles.tripManageDeleteBtn}
+                    onPress={() => deleteTrip(item)}
+                  >
+                    <Text style={styles.tripManageDeleteText}>Delete</Text>
+                  </TouchableOpacity>
+                </View>
+              )}
+              ListEmptyComponent={
+                <Text style={styles.noTripsText}>No pins logged yet.</Text>
+              }
+            />
 
             <TouchableOpacity
               style={styles.signOutBtn}
@@ -466,29 +575,9 @@ export default function HomeScreen() {
             </TouchableOpacity>
           </View>
 
-          {/* Current GPS button */}
-          <TouchableOpacity
-            style={styles.locationBtn}
-            onPress={useMyLocation}
-            disabled={locating || creatingTrip}
-          >
-            {locating ? (
-              <ActivityIndicator color="#000" size="small" />
-            ) : (
-              <Text style={styles.locationIcon}>📍</Text>
-            )}
-            <Text style={styles.locationBtnText}>Use My Current Location</Text>
-          </TouchableOpacity>
-
-          <View style={styles.dividerRow}>
-            <View style={styles.dividerLine} />
-            <Text style={styles.dividerText}>or search city name</Text>
-            <View style={styles.dividerLine} />
-          </View>
-
           <TextInput
             style={styles.cityInput}
-            placeholder="e.g. Paris, Tokyo, Berlin..."
+            placeholder="Search a city (e.g. Paris, Tokyo, Berlin)..."
             placeholderTextColor="#999"
             value={citySearch}
             onChangeText={setCitySearch}
@@ -744,16 +833,34 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   previewCloseText: { color: '#6B7280', fontSize: 13, fontWeight: '700' },
+  previewActionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 14,
+    gap: 10,
+  },
   previewActionBtn: {
+    flex: 1,
     backgroundColor: '#111827',
     borderRadius: 14,
     paddingVertical: 13,
     alignItems: 'center',
-    marginTop: 14,
   },
   previewActionBtnText: {
     color: '#fff',
     fontSize: 15,
+    fontWeight: '700',
+  },
+  deletePinBtn: {
+    backgroundColor: '#FEE2E2',
+    paddingHorizontal: 14,
+    paddingVertical: 13,
+    borderRadius: 14,
+    alignItems: 'center',
+  },
+  deletePinText: {
+    color: '#DC2626',
+    fontSize: 14,
     fontWeight: '700',
   },
   modalBackdrop: {
@@ -786,30 +893,70 @@ const styles = StyleSheet.create({
     color: '#6B7280',
     textAlign: 'center',
     marginTop: 4,
-    marginBottom: 20,
+    marginBottom: 16,
   },
   accountStatsCard: {
     flexDirection: 'row',
     backgroundColor: '#F9FAFB',
     borderRadius: 16,
-    paddingVertical: 16,
+    paddingVertical: 14,
     paddingHorizontal: 20,
-    marginBottom: 24,
+    marginBottom: 16,
     borderWidth: 1,
     borderColor: '#EEEEEE',
   },
   statCol: { flex: 1, alignItems: 'center' },
-  statNumber: { fontSize: 24, fontWeight: '800', color: '#111' },
+  statNumber: { fontSize: 22, fontWeight: '800', color: '#111' },
   statLabel: { fontSize: 12, color: '#6B7280', marginTop: 2, fontWeight: '600' },
   statDivider: { width: 1, height: '80%', backgroundColor: '#E5E7EB', alignSelf: 'center' },
-  signOutBtn: {
+  sectionHeader: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#374151',
+    marginBottom: 10,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  tripsList: {
+    maxHeight: 180,
+    marginBottom: 16,
+  },
+  tripManageRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: '#F3F4F6',
+  },
+  tripManageInfo: { flex: 1 },
+  tripManageName: { fontSize: 15, fontWeight: '700', color: '#111' },
+  tripManageSub: { fontSize: 12, color: '#6B7280', marginTop: 2 },
+  tripManageDeleteBtn: {
     backgroundColor: '#FEE2E2',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+  },
+  tripManageDeleteText: {
+    color: '#DC2626',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  noTripsText: {
+    textAlign: 'center',
+    color: '#9CA3AF',
+    paddingVertical: 20,
+    fontSize: 14,
+  },
+  signOutBtn: {
+    backgroundColor: '#F3F4F6',
     paddingVertical: 14,
     borderRadius: 16,
     alignItems: 'center',
   },
   signOutText: {
-    color: '#DC2626',
+    color: '#374151',
     fontSize: 15,
     fontWeight: '700',
   },
@@ -823,26 +970,6 @@ const styles = StyleSheet.create({
   },
   modalTitle: { fontSize: 20, fontWeight: 'bold', color: '#111' },
   cancelText: { fontSize: 16, color: '#6B7280' },
-  locationBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginHorizontal: 20,
-    marginBottom: 4,
-    backgroundColor: '#F3F4F6',
-    borderRadius: 14,
-    paddingVertical: 14,
-    paddingHorizontal: 16,
-  },
-  locationIcon: { fontSize: 18, marginRight: 10 },
-  locationBtnText: { fontSize: 15, fontWeight: '600', color: '#111' },
-  dividerRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginHorizontal: 20,
-    marginVertical: 14,
-  },
-  dividerLine: { flex: 1, height: 1, backgroundColor: '#E5E7EB' },
-  dividerText: { marginHorizontal: 10, fontSize: 13, color: '#9CA3AF' },
   cityInput: {
     marginHorizontal: 20,
     borderWidth: 1,
