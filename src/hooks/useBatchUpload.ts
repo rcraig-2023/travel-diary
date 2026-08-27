@@ -5,6 +5,7 @@ import * as ImageManipulator from "expo-image-manipulator";
 import { supabase } from "../lib/supabase";
 import { useAuth } from "../context/AuthContext";
 import { Photo } from "../types";
+import { recognizeLandmarksAndLabels } from "./useLandmarkRecognition";
 
 export type ExtractedExif = {
   lat: number | null;
@@ -22,6 +23,7 @@ export type UploadProgress = {
 export type BatchUploadOptions = {
   tripId?: string;
   itineraryItemId?: string;
+  autoTag?: boolean; // Enable on-device ML tagging (default: true)
   onPhotoUploaded?: (photo: Photo, index: number, total: number) => void;
 };
 
@@ -184,7 +186,17 @@ export function useBatchUpload(defaultTripId?: string) {
           // STEP A: EXIF Extraction FIRST (before compression strips metadata)
           const exifData = extractExifMetadata(asset.exif);
 
-          // STEP B: Aggressive Client-Side Compression
+          // STEP B: Automated On-Device Tagging (Local ML Kit, zero cloud cost)
+          let detectedTags: string[] = [];
+          if (options?.autoTag !== false) {
+            try {
+              detectedTags = await recognizeLandmarksAndLabels(asset.uri);
+            } catch (tagErr) {
+              console.log("[useBatchUpload] Local tagging skipped:", tagErr);
+            }
+          }
+
+          // STEP C: Aggressive Client-Side Compression
           // Caps longest edge to 1400px and compresses to 70% JPEG quality
           const maxDimension = 1400;
           const manipActions: ImageManipulator.Action[] = [];
@@ -210,7 +222,7 @@ export function useBatchUpload(defaultTripId?: string) {
             }
           );
 
-          // STEP C: Storage Upload to Supabase "photos" bucket
+          // STEP D: Storage Upload to Supabase "photos" bucket
           const response = await fetch(compressed.uri);
           const blob = await response.blob();
 
@@ -231,7 +243,7 @@ export function useBatchUpload(defaultTripId?: string) {
 
           const { data: { publicUrl } } = supabase.storage.from("photos").getPublicUrl(storagePath);
 
-          // STEP D: Database Sync - insert into photos table with EXIF and coordinates
+          // STEP E: Database Sync - insert into photos table with EXIF, tags and coordinates
           const { data: photoRow, error: dbError } = await supabase
             .from("photos")
             .insert({
@@ -244,9 +256,9 @@ export function useBatchUpload(defaultTripId?: string) {
               taken_at: exifData.takenAt,
               itinerary_item_id: options?.itineraryItemId || null,
               ai_tags: {
-                landmarks: [],
+                landmarks: detectedTags,
                 restaurants: [],
-                tags: [],
+                tags: detectedTags,
                 exif: {
                   lat: exifData.lat,
                   lng: exifData.lng,
