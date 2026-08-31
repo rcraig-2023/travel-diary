@@ -132,7 +132,13 @@ export default function CityScreen() {
       </View>
 
       <View style={styles.content}>
-        {activeTab === 'Photos' && <PhotosTab tripId={trip.id} />}
+        {activeTab === 'Photos' && (
+          <PhotosTab
+            tripId={trip.id}
+            cityName={trip.city_name}
+            country={trip.country}
+          />
+        )}
         {activeTab === 'Jots' && <JotsTab tripId={trip.id} />}
         {activeTab === 'Highlights' && <LandmarksTab tripId={trip.id} />}
         {activeTab === 'Restaurants' && (

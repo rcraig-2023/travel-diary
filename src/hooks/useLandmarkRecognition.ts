@@ -1,5 +1,6 @@
 import { useState, useCallback } from "react";
 import * as Location from "expo-location";
+import { analyzePhoto } from "../lib/gemini";
 
 export type ImageLabel = {
   text: string;
@@ -11,6 +12,8 @@ export type RecognitionOptions = {
   confidenceThreshold?: number; // Minimum confidence (0.0 to 1.0), defaults to 0.5
   maxResults?: number; // Maximum number of labels to return
   gps?: { lat: number; lng: number } | null;
+  cityName?: string | null;
+  base64?: string | null;
 };
 
 export type RecognitionResult = {
@@ -25,14 +28,13 @@ export type RecognitionResult = {
 
 /**
  * Free, zero-cost reverse GPS landmark resolver using OpenStreetMap Nominatim and Expo Location.
- * Completely free, requires no API key, and identifies exact POIs (e.g., "Cathédrale Notre-Dame de Paris", "Eiffel Tower").
+ * Identifies exact POIs (e.g., "Cathédrale Notre-Dame de Paris", "Eiffel Tower").
  */
 export async function resolveLandmarkFromGps(
   lat: number,
   lng: number
 ): Promise<{ landmark: string | null; tags: string[]; locationDetails?: any }> {
   try {
-    // 1. Query OpenStreetMap Nominatim reverse API for high-precision POI/Landmark detection
     const nominatimUrl = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}&zoom=18&addressdetails=1`;
     const response = await fetch(nominatimUrl, {
       headers: {
@@ -64,10 +66,10 @@ export async function resolveLandmarkFromGps(
       }
     }
   } catch (err) {
-    console.log("[resolveLandmarkFromGps] Nominatim lookup fallback:", err);
+    console.log("[resolveLandmarkFromGps] Nominatim lookup notice:", err);
   }
 
-  // 2. Fallback to native system reverse geocoder via expo-location
+  // Fallback to native system reverse geocoder via expo-location
   try {
     const [geo] = await Location.reverseGeocodeAsync({ latitude: lat, longitude: lng });
     if (geo) {
@@ -84,39 +86,59 @@ export async function resolveLandmarkFromGps(
       };
     }
   } catch (err) {
-    console.log("[resolveLandmarkFromGps] Expo reverse geocode fallback:", err);
+    console.log("[resolveLandmarkFromGps] Expo reverse geocode notice:", err);
   }
 
   return { landmark: null, tags: [] };
 }
 
 /**
- * Pure on-device & zero-cloud image recognition function.
- * Combines on-device ML Kit image labeling and free GPS POI landmark resolution.
+ * Multi-Stage Automated Landmark & Scenery Recognition:
+ * 1. Visual Recognition (via client-side Gemini Flash Vision API in .env)
+ * 2. EXIF GPS Reverse Landmark Lookup (OpenStreetMap / Expo Location)
+ * 3. On-Device ML Kit Labeling (when available in native builds)
  */
 export async function recognizeLandmarksAndLabels(
   imageUri: string,
   options?: RecognitionOptions
 ): Promise<RecognitionResult> {
-  const threshold = options?.confidenceThreshold ?? 0.5;
   const maxResults = options?.maxResults ?? 10;
+  const threshold = options?.confidenceThreshold ?? 0.5;
   const combinedTags: string[] = [];
   let detectedLandmark: string | null = null;
   let locDetails: any = undefined;
 
-  // Step 1: If GPS coordinates are provided in EXIF, resolve landmark and location tags
+  // Step 1: Visual Image Analysis via free client-side Gemini Vision (if base64 provided)
+  if (options?.base64) {
+    try {
+      const aiResult = await analyzePhoto(options.base64);
+      if (aiResult.landmarks && aiResult.landmarks.length > 0) {
+        detectedLandmark = aiResult.landmarks[0];
+        combinedTags.push(...aiResult.landmarks);
+      }
+      if (aiResult.tags && aiResult.tags.length > 0) {
+        combinedTags.push(...aiResult.tags);
+      }
+    } catch (aiErr) {
+      console.log("[useLandmarkRecognition] Visual AI recognition notice:", aiErr);
+    }
+  }
+
+  // Step 2: If GPS coordinates are available in EXIF, resolve landmark and location tags
   if (options?.gps && typeof options.gps.lat === "number" && typeof options.gps.lng === "number") {
     const gpsResult = await resolveLandmarkFromGps(options.gps.lat, options.gps.lng);
-    if (gpsResult.landmark) {
+    if (gpsResult.landmark && !detectedLandmark) {
       detectedLandmark = gpsResult.landmark;
     }
     if (gpsResult.tags.length > 0) {
       combinedTags.push(...gpsResult.tags);
     }
-    locDetails = gpsResult.locationDetails;
+    if (gpsResult.locationDetails) {
+      locDetails = gpsResult.locationDetails;
+    }
   }
 
-  // Step 2: Run On-Device ML Kit Image Labeling (if running in dev build with native ML Kit linked)
+  // Step 3: On-Device ML Kit Labeling (if available in native client)
   try {
     const MLKitImageLabeling = require("@react-native-ml-kit/image-labeling").default;
     if (MLKitImageLabeling && typeof MLKitImageLabeling.label === "function") {
@@ -131,7 +153,6 @@ export async function recognizeLandmarksAndLabels(
           .map((item) => item.text.trim())
           .filter((t) => t.length > 0);
 
-        // If no GPS landmark was detected, use top ML label if it is a recognized structure/monument
         if (!detectedLandmark && mlTags.length > 0) {
           const first = mlTags[0];
           if (["Cathedral", "Church", "Tower", "Monument", "Castle", "Temple", "Museum", "Palace"].some(k => first.includes(k))) {
@@ -143,11 +164,10 @@ export async function recognizeLandmarksAndLabels(
       }
     }
   } catch (err: any) {
-    // Graceful fallback if running in Expo Go or native module not linked
-    console.log("[useLandmarkRecognition] ML Kit image labeling notice:", err?.message || err);
+    // Graceful fallback in Expo Go
   }
 
-  // Deduplicate and cap results
+  // Step 4: Deduplicate and format tags
   const uniqueTags = Array.from(new Set(combinedTags)).slice(0, maxResults);
 
   return {
@@ -158,7 +178,7 @@ export async function recognizeLandmarksAndLabels(
 }
 
 /**
- * Custom React Hook for automated, 100% on-device photo labeling and landmark recognition.
+ * Custom React Hook for automated photo labeling and landmark recognition.
  */
 export function useLandmarkRecognition() {
   const [labeling, setLabeling] = useState<boolean>(false);
@@ -180,7 +200,7 @@ export function useLandmarkRecognition() {
         setResult(res);
         return res;
       } catch (err: any) {
-        const errMsg = err?.message || "Failed to run on-device photo recognition.";
+        const errMsg = err?.message || "Failed to run photo recognition.";
         setError(errMsg);
         return { landmark: null, tags: [] };
       } finally {
@@ -206,4 +226,5 @@ export function useLandmarkRecognition() {
     reset,
   };
 }
+
 

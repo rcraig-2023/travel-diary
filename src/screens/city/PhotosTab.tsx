@@ -10,7 +10,11 @@ import { useAuth } from '../../context/AuthContext';
 import { Photo } from '../../types';
 import { useBatchUpload } from '../../hooks/useBatchUpload';
 
-type Props = { tripId: string };
+type Props = {
+  tripId: string;
+  cityName?: string;
+  country?: string | null;
+};
 
 type DisplayPhoto = {
   id: string;
@@ -30,7 +34,7 @@ type DisplayPhoto = {
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const COLUMN_WIDTH = (SCREEN_WIDTH - 36) / 2;
 
-export default function PhotosTab({ tripId }: Props) {
+export default function PhotosTab({ tripId, cityName, country }: Props) {
   const { user } = useAuth();
   const [photos, setPhotos] = useState<DisplayPhoto[]>([]);
   const [loading, setLoading] = useState(true);
@@ -80,26 +84,22 @@ export default function PhotosTab({ tripId }: Props) {
                 landmarks: photoLandmarks,
               };
             }
-            const { data: signed, error: sErr } = await supabase.storage
+
+            // Generate signed URL with 30-day validity
+            const { data: signed } = await supabase.storage
               .from('photos')
-              .createSignedUrl(p.storage_path, 3600);
-            if (sErr || !signed?.signedUrl) {
-              return {
-                id: p.id,
-                uri: p.url,
-                storagePath: p.storage_path,
-                remoteUrl: p.url,
-                lat: p.lat,
-                lng: p.lng,
-                takenAt: p.taken_at,
-                tags: photoTags,
-                landmarks: photoLandmarks,
-              };
+              .createSignedUrl(p.storage_path, 60 * 60 * 24 * 30);
+
+            const remoteImageUri = signed?.signedUrl || p.url;
+
+            // Trigger background download to local cache
+            if (signed?.signedUrl) {
+              FileSystem.downloadAsync(signed.signedUrl, localUri).catch(() => {});
             }
-            const res = await FileSystem.downloadAsync(signed.signedUrl, localUri);
+
             return {
               id: p.id,
-              uri: res.status === 200 ? res.uri : p.url,
+              uri: remoteImageUri,
               storagePath: p.storage_path,
               remoteUrl: p.url,
               lat: p.lat,
@@ -134,14 +134,16 @@ export default function PhotosTab({ tripId }: Props) {
   const handleBatchUpload = async () => {
     const uploadedBatch = await pickAndUpload({
       autoTag: true,
+      cityName,
+      country: country || undefined,
       onPhotoUploaded: (newPhoto, current, total) => {
-        // Optimistically show newly uploaded photos in gallery
+        const localCachedUri = `${FileSystem.cacheDirectory}td-${newPhoto.id}.jpg`;
         setPhotos((prev) => {
           if (prev.some((p) => p.id === newPhoto.id)) return prev;
           return [
             {
               id: newPhoto.id,
-              uri: newPhoto.url,
+              uri: localCachedUri,
               storagePath: newPhoto.storage_path,
               remoteUrl: newPhoto.url,
               lat: newPhoto.lat,
@@ -158,6 +160,25 @@ export default function PhotosTab({ tripId }: Props) {
 
     if (uploadedBatch && uploadedBatch.length > 0) {
       fetchPhotos();
+    }
+  };
+
+  const handleImageError = async (item: DisplayPhoto) => {
+    if (item.storagePath) {
+      try {
+        const { data: signed } = await supabase.storage
+          .from('photos')
+          .createSignedUrl(item.storagePath, 60 * 60 * 24 * 7);
+        if (signed?.signedUrl) {
+          setPhotos((prev) =>
+            prev.map((p) => (p.id === item.id ? { ...p, uri: signed.signedUrl } : p))
+          );
+          const localUri = `${FileSystem.cacheDirectory}td-${item.id}.jpg`;
+          FileSystem.downloadAsync(signed.signedUrl, localUri).catch(() => {});
+        }
+      } catch (err) {
+        console.log('[Photos] image error recovery failed:', err);
+      }
     }
   };
 
@@ -236,13 +257,8 @@ export default function PhotosTab({ tripId }: Props) {
                 <Image
                   source={{ uri: item.uri }}
                   style={styles.photoImage}
-                  onError={() =>
-                    setPhotos((prev) =>
-                      prev.map((p) =>
-                        p.id === item.id ? { ...p, uri: p.remoteUrl || p.uri } : p
-                      )
-                    )
-                  }
+                  resizeMode="cover"
+                  onError={() => handleImageError(item)}
                 />
 
                 {/* Detected Landmark or Scenery Badge */}

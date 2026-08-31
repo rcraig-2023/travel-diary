@@ -2,6 +2,7 @@ import { useState, useCallback } from "react";
 import { Alert } from "react-native";
 import * as ImagePicker from "expo-image-picker";
 import * as ImageManipulator from "expo-image-manipulator";
+import * as FileSystem from "expo-file-system/legacy";
 import { supabase } from "../lib/supabase";
 import { useAuth } from "../context/AuthContext";
 import { Photo } from "../types";
@@ -22,8 +23,10 @@ export type UploadProgress = {
 
 export type BatchUploadOptions = {
   tripId?: string;
+  cityName?: string;
+  country?: string;
   itineraryItemId?: string;
-  autoTag?: boolean; // Enable on-device ML tagging (default: true)
+  autoTag?: boolean; // Enable automated landmark tagging (default: true)
   onPhotoUploaded?: (photo: Photo, index: number, total: number) => void;
 };
 
@@ -186,23 +189,7 @@ export function useBatchUpload(defaultTripId?: string) {
           // STEP A: EXIF Extraction FIRST (before compression strips metadata)
           const exifData = extractExifMetadata(asset.exif);
 
-          // STEP B: Automated On-Device & GPS Landmark Recognition (Zero Cloud Cost)
-          let detectedLandmark: string | null = null;
-          let detectedTags: string[] = [];
-          if (options?.autoTag !== false) {
-            try {
-              const recognition = await recognizeLandmarksAndLabels(asset.uri, {
-                gps: exifData.lat && exifData.lng ? { lat: exifData.lat, lng: exifData.lng } : null,
-              });
-              detectedLandmark = recognition.landmark;
-              detectedTags = recognition.tags;
-            } catch (tagErr) {
-              console.log("[useBatchUpload] Landmark recognition notice:", tagErr);
-            }
-          }
-
-          // STEP C: Aggressive Client-Side Compression
-          // Caps longest edge to 1400px and compresses to 70% JPEG quality
+          // STEP B: Aggressive Client-Side Compression (with base64 for recognition and instant caching)
           const maxDimension = 1400;
           const manipActions: ImageManipulator.Action[] = [];
 
@@ -224,8 +211,26 @@ export function useBatchUpload(defaultTripId?: string) {
             {
               compress: 0.7, // Aggressive compression protects 1GB quota
               format: ImageManipulator.SaveFormat.JPEG,
+              base64: true, // Used for instant landmark recognition and zero-latency local caching
             }
           );
+
+          // STEP C: Automated Landmark Recognition (Vision AI + GPS POI Lookup + ML Kit)
+          let detectedLandmark: string | null = null;
+          let detectedTags: string[] = [];
+          if (options?.autoTag !== false) {
+            try {
+              const recognition = await recognizeLandmarksAndLabels(compressed.uri, {
+                base64: compressed.base64,
+                gps: exifData.lat && exifData.lng ? { lat: exifData.lat, lng: exifData.lng } : null,
+                cityName: options?.cityName,
+              });
+              detectedLandmark = recognition.landmark;
+              detectedTags = recognition.tags;
+            } catch (tagErr) {
+              console.log("[useBatchUpload] Landmark recognition notice:", tagErr);
+            }
+          }
 
           // STEP D: Storage Upload to Supabase "photos" bucket
           const response = await fetch(compressed.uri);
@@ -304,6 +309,18 @@ export function useBatchUpload(defaultTripId?: string) {
             }
           } else {
             photoRow = insertedData;
+          }
+
+          // Write directly to local FileSystem cache so image renders instantly without network delay
+          const localCacheUri = `${FileSystem.cacheDirectory}td-${photoRow.id}.jpg`;
+          try {
+            if (compressed.base64) {
+              await FileSystem.writeAsStringAsync(localCacheUri, compressed.base64, { encoding: "base64" });
+            } else {
+              await FileSystem.copyAsync({ from: compressed.uri, to: localCacheUri });
+            }
+          } catch (cacheErr) {
+            console.log("[useBatchUpload] local cache write notice:", cacheErr);
           }
 
           // Auto-insert detected landmark into landmarks highlights table if found
