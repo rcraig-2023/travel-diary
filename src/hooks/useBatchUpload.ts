@@ -251,33 +251,59 @@ export function useBatchUpload(defaultTripId?: string) {
           const landmarkList = detectedLandmark ? [detectedLandmark] : detectedTags.slice(0, 2);
 
           // STEP E: Database Sync - insert into photos table with EXIF, landmark tags and coordinates
-          const { data: photoRow, error: dbError } = await supabase
-            .from("photos")
-            .insert({
-              trip_id: targetTripId,
-              user_id: user.id,
-              storage_path: storagePath,
-              url: publicUrl,
-              lat: exifData.lat,
-              lng: exifData.lng,
-              taken_at: exifData.takenAt,
-              itinerary_item_id: options?.itineraryItemId || null,
-              ai_tags: {
-                landmarks: landmarkList,
-                restaurants: [],
-                tags: detectedTags,
-                exif: {
-                  lat: exifData.lat,
-                  lng: exifData.lng,
-                  taken_at: exifData.takenAt,
-                },
+          let photoRow: any = null;
+          const fullPayload: any = {
+            trip_id: targetTripId,
+            user_id: user.id,
+            storage_path: storagePath,
+            url: publicUrl,
+            lat: exifData.lat,
+            lng: exifData.lng,
+            taken_at: exifData.takenAt,
+            itinerary_item_id: options?.itineraryItemId || null,
+            ai_tags: {
+              landmarks: landmarkList,
+              restaurants: [],
+              tags: detectedTags,
+              exif: {
+                lat: exifData.lat,
+                lng: exifData.lng,
+                taken_at: exifData.takenAt,
               },
-            })
+            },
+          };
+
+          const { data: insertedData, error: dbError } = await supabase
+            .from("photos")
+            .insert(fullPayload)
             .select()
             .single();
 
           if (dbError) {
-            throw new Error("Failed to save photo record " + (i + 1) + ": " + dbError.message);
+            // If the database schema has not added the 'lat' column yet, fallback to base columns
+            if (dbError.message?.includes("lat") || dbError.message?.includes("schema cache")) {
+              const fallbackPayload = {
+                trip_id: targetTripId,
+                user_id: user.id,
+                storage_path: storagePath,
+                url: publicUrl,
+                ai_tags: fullPayload.ai_tags,
+              };
+              const { data: fallbackData, error: fallbackError } = await supabase
+                .from("photos")
+                .insert(fallbackPayload)
+                .select()
+                .single();
+
+              if (fallbackError) {
+                throw new Error("Failed to save photo record: " + fallbackError.message);
+              }
+              photoRow = fallbackData;
+            } else {
+              throw new Error("Failed to save photo record " + (i + 1) + ": " + dbError.message);
+            }
+          } else {
+            photoRow = insertedData;
           }
 
           // Auto-insert detected landmark into landmarks highlights table if found
