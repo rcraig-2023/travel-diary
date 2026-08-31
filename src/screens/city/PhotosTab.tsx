@@ -2,13 +2,13 @@ import React, { useState, useEffect } from 'react';
 import {
   View, Text, FlatList, Image, TouchableOpacity, StyleSheet,
   ActivityIndicator, Alert, Modal, TextInput, KeyboardAvoidingView,
-  Platform, TouchableWithoutFeedback, Keyboard,
+  Platform, TouchableWithoutFeedback, Keyboard, ScrollView, Dimensions,
 } from 'react-native';
-import * as ImagePicker from 'expo-image-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../context/AuthContext';
 import { Photo } from '../../types';
+import { useBatchUpload } from '../../hooks/useBatchUpload';
 
 type Props = { tripId: string };
 
@@ -17,174 +17,152 @@ type DisplayPhoto = {
   uri: string;
   storagePath?: string;
   remoteUrl?: string;
+  lat?: number | null;
+  lng?: number | null;
+  takenAt?: string | null;
+  tags?: string[];
+  landmarks?: string[];
   uploading?: boolean;
   errored?: boolean;
   errorMsg?: string;
 };
 
+const { width: SCREEN_WIDTH } = Dimensions.get('window');
+const COLUMN_WIDTH = (SCREEN_WIDTH - 36) / 2;
+
 export default function PhotosTab({ tripId }: Props) {
   const { user } = useAuth();
   const [photos, setPhotos] = useState<DisplayPhoto[]>([]);
-  const [uploading, setUploading] = useState(false);
-  const [showLabelModal, setShowLabelModal] = useState(false);
-  const [pendingAsset, setPendingAsset] = useState<ImagePicker.ImagePickerAsset | null>(null);
-  const [label, setLabel] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [selectedPhoto, setSelectedPhoto] = useState<DisplayPhoto | null>(null);
+
+  // Hook for batch uploading, EXIF extraction, compression, and automated landmark tagging
+  const { pickAndUpload, uploading, progress } = useBatchUpload(tripId);
 
   useEffect(() => {
     fetchPhotos();
   }, [tripId]);
 
   const fetchPhotos = async () => {
-    const { data, error } = await supabase
-      .from('photos')
-      .select('*')
-      .eq('trip_id', tripId)
-      .order('created_at', { ascending: false });
+    setLoading(true);
+    try {
+      const { data, error } = await supabase
+        .from('photos')
+        .select('*')
+        .eq('trip_id', tripId)
+        .order('created_at', { ascending: false });
 
-    if (error) { console.log('[Photos] DB fetch error:', error); return; }
-    if (!data) return;
+      if (error) {
+        console.log('[Photos] DB fetch error:', error);
+        return;
+      }
+      if (!data) return;
 
-    const rows = data as Photo[];
-    const display: DisplayPhoto[] = await Promise.all(
-      rows.map(async (p) => {
-        const localUri = `${FileSystem.cacheDirectory}td-${p.id}.jpg`;
-        try {
-          const info = await FileSystem.getInfoAsync(localUri);
-          if (info.exists) {
-            return { id: p.id, uri: localUri, storagePath: p.storage_path, remoteUrl: p.url };
+      const rows = data as Photo[];
+      const display: DisplayPhoto[] = await Promise.all(
+        rows.map(async (p) => {
+          const localUri = `${FileSystem.cacheDirectory}td-${p.id}.jpg`;
+          const photoTags = p.ai_tags?.tags || [];
+          const photoLandmarks = p.ai_tags?.landmarks || [];
+
+          try {
+            const info = await FileSystem.getInfoAsync(localUri);
+            if (info.exists) {
+              return {
+                id: p.id,
+                uri: localUri,
+                storagePath: p.storage_path,
+                remoteUrl: p.url,
+                lat: p.lat,
+                lng: p.lng,
+                takenAt: p.taken_at,
+                tags: photoTags,
+                landmarks: photoLandmarks,
+              };
+            }
+            const { data: signed, error: sErr } = await supabase.storage
+              .from('photos')
+              .createSignedUrl(p.storage_path, 3600);
+            if (sErr || !signed?.signedUrl) {
+              return {
+                id: p.id,
+                uri: p.url,
+                storagePath: p.storage_path,
+                remoteUrl: p.url,
+                lat: p.lat,
+                lng: p.lng,
+                takenAt: p.taken_at,
+                tags: photoTags,
+                landmarks: photoLandmarks,
+              };
+            }
+            const res = await FileSystem.downloadAsync(signed.signedUrl, localUri);
+            return {
+              id: p.id,
+              uri: res.status === 200 ? res.uri : p.url,
+              storagePath: p.storage_path,
+              remoteUrl: p.url,
+              lat: p.lat,
+              lng: p.lng,
+              takenAt: p.taken_at,
+              tags: photoTags,
+              landmarks: photoLandmarks,
+            };
+          } catch {
+            return {
+              id: p.id,
+              uri: p.url,
+              storagePath: p.storage_path,
+              remoteUrl: p.url,
+              lat: p.lat,
+              lng: p.lng,
+              takenAt: p.taken_at,
+              tags: photoTags,
+              landmarks: photoLandmarks,
+            };
           }
-          const { data: signed, error: sErr } = await supabase.storage
-            .from('photos')
-            .createSignedUrl(p.storage_path, 3600);
-          if (sErr || !signed?.signedUrl) {
-            const msg = sErr?.message || 'could not sign URL';
-            console.log('[Photos] sign failed for', p.storage_path, msg);
-            return { id: p.id, uri: '', storagePath: p.storage_path, remoteUrl: p.url, errored: true, errorMsg: msg };
-          }
-          const res = await FileSystem.downloadAsync(signed.signedUrl, localUri);
-          if (res.status !== 200) {
-            console.log('[Photos] download HTTP', res.status, 'for', p.storage_path);
-            return { id: p.id, uri: '', storagePath: p.storage_path, remoteUrl: p.url, errored: true, errorMsg: `download HTTP ${res.status}` };
-          }
-          return { id: p.id, uri: res.uri, storagePath: p.storage_path, remoteUrl: p.url };
-        } catch (e: any) {
-          const msg = e?.message ?? 'download error';
-          console.log('[Photos] exception for', p.storage_path, msg);
-          return { id: p.id, uri: '', storagePath: p.storage_path, remoteUrl: p.url, errored: true, errorMsg: msg };
-        }
-      })
-    );
-    setPhotos(display);
+        })
+      );
+      setPhotos(display);
+    } catch (err) {
+      console.log('[Photos] Exception fetching:', err);
+    } finally {
+      setLoading(false);
+    }
   };
 
-  const pickPhoto = async () => {
-    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (status !== 'granted') {
-      Alert.alert('Permission needed', 'Please allow photo library access in Settings.');
-      return;
-    }
-
-    const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ['images'],
-      quality: 0.8,
-      base64: true,
+  const handleBatchUpload = async () => {
+    const uploadedBatch = await pickAndUpload({
+      autoTag: true,
+      onPhotoUploaded: (newPhoto, current, total) => {
+        // Optimistically show newly uploaded photos in gallery
+        setPhotos((prev) => {
+          if (prev.some((p) => p.id === newPhoto.id)) return prev;
+          return [
+            {
+              id: newPhoto.id,
+              uri: newPhoto.url,
+              storagePath: newPhoto.storage_path,
+              remoteUrl: newPhoto.url,
+              lat: newPhoto.lat,
+              lng: newPhoto.lng,
+              takenAt: newPhoto.taken_at,
+              tags: newPhoto.ai_tags?.tags || [],
+              landmarks: newPhoto.ai_tags?.landmarks || [],
+            },
+            ...prev,
+          ];
+        });
+      },
     });
 
-    if (result.canceled || !result.assets[0]) return;
-
-    const asset = result.assets[0];
-    if (!asset.base64) {
-      Alert.alert('Upload failed', 'Could not read the selected image. Please try another photo.');
-      return;
+    if (uploadedBatch && uploadedBatch.length > 0) {
+      fetchPhotos();
     }
-
-    setPendingAsset(asset);
-    setLabel('');
-    setShowLabelModal(true);
-  };
-
-  const confirmUpload = async () => {
-    if (!pendingAsset?.base64) return;
-
-    const asset = pendingAsset;
-    const capturedLabel = label.trim();
-
-    setShowLabelModal(false);
-    setPendingAsset(null);
-    setLabel('');
-
-    const tempId = `temp-${Date.now()}`;
-    const localDataUri = `data:image/jpeg;base64,${asset.base64}`;
-
-    setPhotos((prev) => [{ id: tempId, uri: localDataUri, uploading: true }, ...prev]);
-    setUploading(true);
-
-    try {
-      const fileName = `${Date.now()}.jpg`;
-      const storagePath = `${user!.id}/${tripId}/${fileName}`;
-
-      const jpegBlob = await (await fetch(`data:image/jpeg;base64,${asset.base64}`)).blob();
-
-      const { error: uploadError } = await supabase.storage
-        .from('photos')
-        .upload(storagePath, jpegBlob, { contentType: 'image/jpeg', upsert: false });
-
-      if (uploadError) throw new Error(uploadError.message);
-
-      const { data: { publicUrl } } = supabase.storage.from('photos').getPublicUrl(storagePath);
-
-      const { data: inserted, error: dbError } = await supabase.from('photos').insert({
-        trip_id: tripId,
-        user_id: user!.id,
-        storage_path: storagePath,
-        url: publicUrl,
-        ai_tags: { landmarks: [], restaurants: [], tags: [] },
-      }).select().single();
-
-      if (dbError) throw new Error(dbError.message);
-
-      const cachedUri = `${FileSystem.cacheDirectory}td-${inserted.id}.jpg`;
-      try {
-        if (asset.base64) {
-          await FileSystem.writeAsStringAsync(cachedUri, asset.base64, { encoding: 'base64' });
-        }
-      } catch (e) {
-        console.log('[Photos] cache write failed', e);
-      }
-
-      setPhotos((prev) =>
-        prev.map((p) =>
-          p.id === tempId
-            ? { id: inserted.id, uri: cachedUri, storagePath, remoteUrl: publicUrl, uploading: false }
-            : p
-        )
-      );
-
-      if (capturedLabel) {
-        await supabase.from('landmarks').insert({
-          trip_id: tripId,
-          user_id: user!.id,
-          name: capturedLabel,
-          visited: true,
-          source: 'manual',
-        });
-      }
-    } catch (err: any) {
-      setPhotos((prev) => prev.filter((p) => p.id !== tempId));
-      Alert.alert('Upload failed', err.message);
-    } finally {
-      setUploading(false);
-    }
-  };
-
-  const cancelUpload = () => {
-    setShowLabelModal(false);
-    setPendingAsset(null);
-    setLabel('');
   };
 
   const deletePhoto = (item: DisplayPhoto) => {
-    Alert.alert('Delete photo', 'Remove this photo from your trip?', [
+    Alert.alert('Delete Photo', 'Remove this photo from your trip diary?', [
       { text: 'Cancel', style: 'cancel' },
       {
         text: 'Delete',
@@ -202,164 +180,402 @@ export default function PhotosTab({ tripId }: Props) {
             }
           }
           setPhotos((prev) => prev.filter((p) => p.id !== item.id));
+          if (selectedPhoto?.id === item.id) setSelectedPhoto(null);
         },
       },
     ]);
   };
 
+  const formatPhotoDate = (dateStr?: string | null) => {
+    if (!dateStr) return null;
+    try {
+      const d = new Date(dateStr);
+      return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+    } catch {
+      return null;
+    }
+  };
+
   return (
     <View style={styles.container}>
-      <FlatList
-        data={photos}
-        keyExtractor={(item) => item.id}
-        numColumns={2}
-        contentContainerStyle={styles.gallery}
-        renderItem={({ item }) => (
-          <View style={styles.photoWrapper}>
-            {item.errored || !item.uri ? (
-              <View style={[styles.photo, styles.errorTile]}>
-                <Text style={styles.errorIcon}>📷</Text>
-                {item.errorMsg ? <Text style={styles.errorMsgText}>{item.errorMsg}</Text> : null}
-              </View>
-            ) : (
-              <Image
-                source={{ uri: item.uri }}
-                style={styles.photo}
-                onError={() =>
-                  setPhotos((prev) =>
-                    prev.map((p) =>
-                      p.id === item.id
-                        ? { ...p, errored: true, errorMsg: p.errorMsg ?? 'Image failed to render' }
-                        : p
-                    )
-                  )
-                }
-              />
-            )}
-            {item.uploading ? (
-              <View style={styles.uploadingOverlay}>
-                <ActivityIndicator color="#fff" />
-              </View>
-            ) : (
-              <TouchableOpacity style={styles.deleteBtn} onPress={() => deletePhoto(item)}>
-                <Text style={styles.deleteBtnText}>✕</Text>
-              </TouchableOpacity>
-            )}
+      {/* Upload Progress Banner */}
+      {uploading && (
+        <View style={styles.progressBanner}>
+          <ActivityIndicator color="#00A699" size="small" />
+          <View style={{ flex: 1, marginLeft: 10 }}>
+            <Text style={styles.progressTitle}>
+              Uploading {progress.current} of {progress.total} photos ({progress.percentage}%)
+            </Text>
+            <Text style={styles.progressSubtitle}>
+              🏷️ Extracting EXIF metadata & scanning landmarks...
+            </Text>
           </View>
-        )}
-        ListEmptyComponent={
-          !uploading ? (
-            <Text style={styles.emptyText}>No photos yet. Tap below to add your first one.</Text>
-          ) : null
-        }
-      />
+        </View>
+      )}
 
+      {loading && photos.length === 0 ? (
+        <View style={styles.centerContainer}>
+          <ActivityIndicator size="large" color="#111" />
+        </View>
+      ) : (
+        <FlatList
+          data={photos}
+          keyExtractor={(item) => item.id}
+          numColumns={2}
+          contentContainerStyle={styles.gallery}
+          renderItem={({ item }) => {
+            const topLandmark = item.landmarks?.[0] || item.tags?.[0];
+            const dateDisplay = formatPhotoDate(item.takenAt);
+
+            return (
+              <TouchableOpacity
+                style={styles.photoCard}
+                activeOpacity={0.85}
+                onPress={() => setSelectedPhoto(item)}
+              >
+                <Image
+                  source={{ uri: item.uri }}
+                  style={styles.photoImage}
+                  onError={() =>
+                    setPhotos((prev) =>
+                      prev.map((p) =>
+                        p.id === item.id ? { ...p, uri: p.remoteUrl || p.uri } : p
+                      )
+                    )
+                  }
+                />
+
+                {/* Detected Landmark or Scenery Badge */}
+                {topLandmark ? (
+                  <View style={styles.landmarkBadge}>
+                    <Text style={styles.landmarkBadgeText} numberOfLines={1}>
+                      🏛️ {topLandmark}
+                    </Text>
+                  </View>
+                ) : null}
+
+                {/* Date Taken Badge */}
+                {dateDisplay ? (
+                  <View style={styles.dateBadge}>
+                    <Text style={styles.dateBadgeText}>{dateDisplay}</Text>
+                  </View>
+                ) : null}
+
+                <TouchableOpacity
+                  style={styles.deleteQuickBtn}
+                  onPress={(e) => {
+                    e.stopPropagation();
+                    deletePhoto(item);
+                  }}
+                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                >
+                  <Text style={styles.deleteQuickText}>✕</Text>
+                </TouchableOpacity>
+              </TouchableOpacity>
+            );
+          }}
+          ListEmptyComponent={
+            !uploading ? (
+              <View style={styles.emptyContainer}>
+                <Text style={styles.emptyIcon}>📸</Text>
+                <Text style={styles.emptyTitle}>No photos yet</Text>
+                <Text style={styles.emptyText}>
+                  Batch upload your travel photos. We'll automatically detect landmarks and read dates!
+                </Text>
+              </View>
+            ) : null
+          }
+        />
+      )}
+
+      {/* Bottom Upload Dock */}
       <View style={styles.bottomDock}>
-        <TouchableOpacity style={styles.addButton} onPress={pickPhoto} disabled={uploading}>
+        <TouchableOpacity
+          style={[styles.addButton, uploading && styles.addButtonDisabled]}
+          onPress={handleBatchUpload}
+          disabled={uploading}
+          activeOpacity={0.85}
+        >
           {uploading ? (
             <View style={styles.uploadingRow}>
               <ActivityIndicator color="#fff" />
-              <Text style={[styles.addButtonText, { marginLeft: 10 }]}>Uploading...</Text>
+              <Text style={[styles.addButtonText, { marginLeft: 10 }]}>
+                Uploading & Tagging ({progress.percentage}%)...
+              </Text>
             </View>
           ) : (
-            <Text style={styles.addButtonText}>+ Add Photo</Text>
+            <Text style={styles.addButtonText}>+ Add Photos (Auto-Tag)</Text>
           )}
         </TouchableOpacity>
       </View>
 
+      {/* Full-Screen Photo Details Modal */}
       <Modal
-        visible={showLabelModal}
-        animationType="slide"
+        visible={!!selectedPhoto}
+        animationType="fade"
         transparent
-        onRequestClose={cancelUpload}
+        onRequestClose={() => setSelectedPhoto(null)}
       >
-        <KeyboardAvoidingView
-          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-          style={styles.suggestionOverlay}
-        >
-          <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
-            <View style={styles.modalBackdrop} />
-          </TouchableWithoutFeedback>
-          <View style={styles.suggestionSheet}>
-            <Text style={styles.suggestionTitle}>Add a label (optional)</Text>
-            <Text style={styles.suggestionSub}>e.g. "Eiffel Tower" — appears in Highlights as visited</Text>
-            <TextInput
-              style={styles.labelInput}
-              placeholder="Label this photo..."
-              placeholderTextColor="#999"
-              value={label}
-              onChangeText={setLabel}
-              autoFocus
-              returnKeyType="done"
-              onSubmitEditing={confirmUpload}
-            />
-            <TouchableOpacity style={styles.addButton} onPress={confirmUpload} disabled={uploading}>
-              <Text style={styles.addButtonText}>Save Photo</Text>
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalContent}>
+            <TouchableOpacity
+              style={styles.modalCloseBtn}
+              onPress={() => setSelectedPhoto(null)}
+            >
+              <Text style={styles.modalCloseText}>✕</Text>
             </TouchableOpacity>
-            <TouchableOpacity style={styles.dismissBtn} onPress={cancelUpload}>
-              <Text style={styles.dismissText}>Cancel</Text>
-            </TouchableOpacity>
+
+            {selectedPhoto && (
+              <ScrollView contentContainerStyle={styles.modalScroll}>
+                <Image
+                  source={{ uri: selectedPhoto.uri }}
+                  style={styles.modalImage}
+                  resizeMode="cover"
+                />
+
+                <View style={styles.modalInfoBox}>
+                  {/* Top Landmarks */}
+                  {selectedPhoto.landmarks && selectedPhoto.landmarks.length > 0 && (
+                    <View style={styles.modalSection}>
+                      <Text style={styles.modalSectionLabel}>🏛️ RECOGNIZED LANDMARK</Text>
+                      <View style={styles.tagWrap}>
+                        {selectedPhoto.landmarks.map((lm, idx) => (
+                          <View key={idx} style={styles.landmarkChip}>
+                            <Text style={styles.landmarkChipText}>📍 {lm}</Text>
+                          </View>
+                        ))}
+                      </View>
+                    </View>
+                  )}
+
+                  {/* All Scenery Tags */}
+                  {selectedPhoto.tags && selectedPhoto.tags.length > 0 && (
+                    <View style={styles.modalSection}>
+                      <Text style={styles.modalSectionLabel}>🏷️ SCENERY & OBJECT TAGS</Text>
+                      <View style={styles.tagWrap}>
+                        {selectedPhoto.tags.map((tag, idx) => (
+                          <View key={idx} style={styles.tagChip}>
+                            <Text style={styles.tagChipText}>{tag}</Text>
+                          </View>
+                        ))}
+                      </View>
+                    </View>
+                  )}
+
+                  {/* EXIF Date & Coordinates */}
+                  <View style={styles.metaRow}>
+                    {selectedPhoto.takenAt ? (
+                      <View style={styles.metaItem}>
+                        <Text style={styles.metaLabel}>TAKEN ON</Text>
+                        <Text style={styles.metaValue}>{formatPhotoDate(selectedPhoto.takenAt)}</Text>
+                      </View>
+                    ) : null}
+
+                    {selectedPhoto.lat && selectedPhoto.lng ? (
+                      <View style={styles.metaItem}>
+                        <Text style={styles.metaLabel}>GPS COORDINATES</Text>
+                        <Text style={styles.metaValue}>
+                          {selectedPhoto.lat.toFixed(4)}°, {selectedPhoto.lng.toFixed(4)}°
+                        </Text>
+                      </View>
+                    ) : null}
+                  </View>
+
+                  <TouchableOpacity
+                    style={styles.modalDeleteBtn}
+                    onPress={() => selectedPhoto && deletePhoto(selectedPhoto)}
+                  >
+                    <Text style={styles.modalDeleteText}>🗑 Delete Photo</Text>
+                  </TouchableOpacity>
+                </View>
+              </ScrollView>
+            )}
           </View>
-        </KeyboardAvoidingView>
+        </View>
       </Modal>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#fff' },
-  gallery: { padding: 10 },
-  photoWrapper: { flex: 1, margin: 5 },
-  photo: { width: '100%', aspectRatio: 1, borderRadius: 10, backgroundColor: '#f0f0f0' },
-  errorTile: { justifyContent: 'center', alignItems: 'center', padding: 8 },
-  errorIcon: { fontSize: 28, opacity: 0.4 },
-  errorMsgText: {
-    fontSize: 9,
-    color: '#999',
-    textAlign: 'center',
-    paddingHorizontal: 4,
-    marginTop: 6,
-  },
-  uploadingOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(0,0,0,0.35)',
-    borderRadius: 10,
-    justifyContent: 'center',
+  container: { flex: 1, backgroundColor: '#FAFAFA' },
+  centerContainer: { flex: 1, justifyContent: 'center', alignItems: 'center' },
+  progressBanner: {
+    flexDirection: 'row',
     alignItems: 'center',
+    backgroundColor: '#F0FAFA',
+    borderBottomWidth: 1,
+    borderBottomColor: '#C8EEEB',
+    paddingVertical: 12,
+    paddingHorizontal: 16,
   },
-  deleteBtn: {
+  progressTitle: { fontSize: 13, fontWeight: '700', color: '#0F766E' },
+  progressSubtitle: { fontSize: 11, color: '#14B8A6', marginTop: 2 },
+  gallery: { padding: 12, paddingBottom: 100 },
+  photoCard: {
+    width: COLUMN_WIDTH,
+    height: COLUMN_WIDTH * 1.25,
+    margin: 6,
+    borderRadius: 16,
+    overflow: 'hidden',
+    backgroundColor: '#E5E7EB',
+    position: 'relative',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.08,
+    shadowRadius: 6,
+    elevation: 3,
+  },
+  photoImage: {
+    width: '100%',
+    height: '100%',
+  },
+  landmarkBadge: {
+    position: 'absolute',
+    bottom: 8,
+    left: 8,
+    right: 8,
+    backgroundColor: 'rgba(17, 24, 39, 0.82)',
+    paddingVertical: 4,
+    paddingHorizontal: 8,
+    borderRadius: 10,
+  },
+  landmarkBadgeText: {
+    color: '#fff',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  dateBadge: {
+    position: 'absolute',
+    top: 8,
+    left: 8,
+    backgroundColor: 'rgba(0, 0, 0, 0.55)',
+    paddingVertical: 2,
+    paddingHorizontal: 6,
+    borderRadius: 8,
+  },
+  dateBadgeText: {
+    color: '#fff',
+    fontSize: 10,
+    fontWeight: '600',
+  },
+  deleteQuickBtn: {
     position: 'absolute',
     top: 8,
     right: 8,
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    backgroundColor: 'rgba(0,0,0,0.55)',
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+    backgroundColor: 'rgba(0, 0, 0, 0.65)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  deleteQuickText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: 'bold',
+  },
+  emptyContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingTop: 80,
+    paddingHorizontal: 30,
+  },
+  emptyIcon: { fontSize: 44, marginBottom: 12 },
+  emptyTitle: { fontSize: 18, fontWeight: 'bold', color: '#111', marginBottom: 6 },
+  emptyText: { fontSize: 14, color: '#6B7280', textAlign: 'center', lineHeight: 20 },
+  bottomDock: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    paddingHorizontal: 20,
+    paddingTop: 14,
+    paddingBottom: Platform.OS === 'ios' ? 36 : 20,
+    backgroundColor: '#fff',
+    borderTopWidth: 1,
+    borderTopColor: '#F3F4F6',
+  },
+  addButton: {
+    backgroundColor: '#111827',
+    paddingVertical: 16,
+    borderRadius: 30,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  addButtonDisabled: { backgroundColor: '#4B5563' },
+  addButtonText: { color: '#fff', fontSize: 16, fontWeight: '700' },
+  uploadingRow: { flexDirection: 'row', alignItems: 'center' },
+
+  // Modal styles
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.85)',
     justifyContent: 'center',
     alignItems: 'center',
+    padding: 16,
   },
-  deleteBtnText: { color: '#fff', fontSize: 15, fontWeight: '600', lineHeight: 18 },
-  emptyText: { textAlign: 'center', color: '#999', marginTop: 50, fontSize: 15, paddingHorizontal: 30 },
-  bottomDock: {
-    paddingHorizontal: 20, paddingTop: 15, paddingBottom: 40,
-    backgroundColor: '#fff', borderTopWidth: 1, borderTopColor: '#f0f0f0',
+  modalContent: {
+    width: '100%',
+    maxHeight: '90%',
+    backgroundColor: '#fff',
+    borderRadius: 24,
+    overflow: 'hidden',
+    position: 'relative',
   },
-  addButton: { backgroundColor: '#000', paddingVertical: 18, borderRadius: 30, alignItems: 'center' },
-  addButtonText: { color: '#fff', fontSize: 17, fontWeight: 'bold' },
-  uploadingRow: { flexDirection: 'row', alignItems: 'center' },
-  suggestionOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', justifyContent: 'flex-end' },
-  modalBackdrop: { flex: 1 },
-  suggestionSheet: {
-    backgroundColor: '#fff', borderTopLeftRadius: 20, borderTopRightRadius: 20,
-    padding: 24, paddingBottom: Platform.OS === 'ios' ? 40 : 24,
+  modalCloseBtn: {
+    position: 'absolute',
+    top: 14,
+    right: 14,
+    zIndex: 10,
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  suggestionTitle: { fontSize: 18, fontWeight: 'bold', marginBottom: 4 },
-  suggestionSub: { fontSize: 14, color: '#888', marginBottom: 20 },
-  labelInput: {
-    borderWidth: 1, borderColor: '#ddd', borderRadius: 12,
-    paddingVertical: 12, paddingHorizontal: 14, fontSize: 16, color: '#000',
+  modalCloseText: { color: '#fff', fontSize: 16, fontWeight: 'bold' },
+  modalScroll: { paddingBottom: 24 },
+  modalImage: { width: '100%', height: 320 },
+  modalInfoBox: { padding: 20 },
+  modalSection: { marginBottom: 18 },
+  modalSectionLabel: { fontSize: 11, fontWeight: '800', color: '#6B7280', marginBottom: 8, letterSpacing: 0.5 },
+  tagWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
+  landmarkChip: {
+    backgroundColor: '#F0FAFA',
+    borderWidth: 1,
+    borderColor: '#99F6E4',
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 16,
+  },
+  landmarkChipText: { color: '#0F766E', fontSize: 13, fontWeight: '700' },
+  tagChip: {
+    backgroundColor: '#F3F4F6',
+    paddingVertical: 5,
+    paddingHorizontal: 10,
+    borderRadius: 14,
+  },
+  tagChipText: { color: '#374151', fontSize: 12, fontWeight: '600' },
+  metaRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    paddingVertical: 14,
+    borderTopWidth: 1,
+    borderTopColor: '#F3F4F6',
+    borderBottomWidth: 1,
+    borderBottomColor: '#F3F4F6',
     marginBottom: 20,
   },
-  dismissBtn: { marginTop: 16, alignItems: 'center' },
-  dismissText: { fontSize: 16, color: '#666' },
+  metaItem: { flex: 1 },
+  metaLabel: { fontSize: 10, fontWeight: '700', color: '#9CA3AF', marginBottom: 4 },
+  metaValue: { fontSize: 13, fontWeight: '600', color: '#111827' },
+  modalDeleteBtn: {
+    backgroundColor: '#FEE2E2',
+    paddingVertical: 14,
+    borderRadius: 16,
+    alignItems: 'center',
+  },
+  modalDeleteText: { color: '#DC2626', fontSize: 15, fontWeight: '700' },
 });

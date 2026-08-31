@@ -186,13 +186,18 @@ export function useBatchUpload(defaultTripId?: string) {
           // STEP A: EXIF Extraction FIRST (before compression strips metadata)
           const exifData = extractExifMetadata(asset.exif);
 
-          // STEP B: Automated On-Device Tagging (Local ML Kit, zero cloud cost)
+          // STEP B: Automated On-Device & GPS Landmark Recognition (Zero Cloud Cost)
+          let detectedLandmark: string | null = null;
           let detectedTags: string[] = [];
           if (options?.autoTag !== false) {
             try {
-              detectedTags = await recognizeLandmarksAndLabels(asset.uri);
+              const recognition = await recognizeLandmarksAndLabels(asset.uri, {
+                gps: exifData.lat && exifData.lng ? { lat: exifData.lat, lng: exifData.lng } : null,
+              });
+              detectedLandmark = recognition.landmark;
+              detectedTags = recognition.tags;
             } catch (tagErr) {
-              console.log("[useBatchUpload] Local tagging skipped:", tagErr);
+              console.log("[useBatchUpload] Landmark recognition notice:", tagErr);
             }
           }
 
@@ -243,7 +248,9 @@ export function useBatchUpload(defaultTripId?: string) {
 
           const { data: { publicUrl } } = supabase.storage.from("photos").getPublicUrl(storagePath);
 
-          // STEP E: Database Sync - insert into photos table with EXIF, tags and coordinates
+          const landmarkList = detectedLandmark ? [detectedLandmark] : detectedTags.slice(0, 2);
+
+          // STEP E: Database Sync - insert into photos table with EXIF, landmark tags and coordinates
           const { data: photoRow, error: dbError } = await supabase
             .from("photos")
             .insert({
@@ -256,7 +263,7 @@ export function useBatchUpload(defaultTripId?: string) {
               taken_at: exifData.takenAt,
               itinerary_item_id: options?.itineraryItemId || null,
               ai_tags: {
-                landmarks: detectedTags,
+                landmarks: landmarkList,
                 restaurants: [],
                 tags: detectedTags,
                 exif: {
@@ -271,6 +278,21 @@ export function useBatchUpload(defaultTripId?: string) {
 
           if (dbError) {
             throw new Error("Failed to save photo record " + (i + 1) + ": " + dbError.message);
+          }
+
+          // Auto-insert detected landmark into landmarks highlights table if found
+          if (detectedLandmark) {
+            try {
+              await supabase.from("landmarks").insert({
+                trip_id: targetTripId,
+                user_id: user.id,
+                name: detectedLandmark,
+                visited: true,
+                source: "ai",
+              });
+            } catch (landmarkErr) {
+              console.log("[useBatchUpload] Landmark insert notice:", landmarkErr);
+            }
           }
 
           const insertedPhoto = photoRow as Photo;
