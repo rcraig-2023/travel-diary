@@ -93,38 +93,51 @@ export function extractExifMetadata(exif: Record<string, any> | undefined | null
 
   let takenAt: string | null = null;
   if (typeof rawDateStr === "string" && rawDateStr.trim().length > 0) {
-    // Standard EXIF format: "YYYY:MM:DD HH:MM:SS"
-    const match = rawDateStr.trim().match(/^(\d{4})[:\-](\d{2})[:\-](\d{2})[ T](\d{2}):(\d{2}):(\d{2})/);
-    if (match) {
-      const [, y, m, d, h, min, s] = match;
-      const dateObj = new Date(Date.UTC(+y, +m - 1, +d, +h, +min, +s));
-      if (!isNaN(dateObj.getTime())) {
-        takenAt = dateObj.toISOString();
-      }
-    } else {
-      const parsed = new Date(rawDateStr);
-      if (!isNaN(parsed.getTime())) {
-        takenAt = parsed.toISOString();
-      }
+    const formatted = rawDateStr.trim().replace(/^(\d{4}):(\d{2}):(\d{2})/, "$1-$2-$3");
+    const d = new Date(formatted);
+    if (!isNaN(d.getTime())) {
+      takenAt = d.toISOString();
     }
   }
 
-  return {
-    lat,
-    lng,
-    takenAt,
-    rawExif: exif,
-  };
+  return { lat, lng, takenAt, rawExif: exif };
 }
 
-/**
- * Custom hook for batch photo selection, EXIF extraction, aggressive client-side
- * compression (to protect Supabase storage limit), storage upload, and database synchronization.
- */
+// Upload with 2 automatic retries for network resilience
+async function uploadToStorageWithRetry(
+  storagePath: string,
+  blob: Blob,
+  retries = 2
+): Promise<void> {
+  let lastErr: any = null;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const { error } = await supabase.storage
+        .from("photos")
+        .upload(storagePath, blob, {
+          contentType: "image/jpeg",
+          upsert: true,
+        });
+      if (!error) return;
+      lastErr = error;
+    } catch (e) {
+      lastErr = e;
+    }
+    if (attempt < retries) {
+      await new Promise((r) => setTimeout(r, 600 * (attempt + 1)));
+    }
+  }
+  throw new Error(lastErr?.message || "Storage upload failed after retries");
+}
+
 export function useBatchUpload(defaultTripId?: string) {
   const { user } = useAuth();
-  const [uploading, setUploading] = useState(false);
-  const [progress, setProgress] = useState<UploadProgress>({ current: 0, total: 0, percentage: 0 });
+  const [uploading, setUploading] = useState<boolean>(false);
+  const [progress, setProgress] = useState<UploadProgress>({
+    current: 0,
+    total: 0,
+    percentage: 0,
+  });
   const [error, setError] = useState<string | null>(null);
   const [uploadedPhotos, setUploadedPhotos] = useState<Photo[]>([]);
 
@@ -138,61 +151,52 @@ export function useBatchUpload(defaultTripId?: string) {
   const pickAndUpload = useCallback(
     async (options?: BatchUploadOptions): Promise<Photo[] | null> => {
       const targetTripId = options?.tripId || defaultTripId;
+      if (!targetTripId) {
+        Alert.alert("Upload Error", "Trip ID is required for photo upload.");
+        return null;
+      }
 
       if (!user) {
-        const msg = "User must be authenticated to upload photos.";
-        setError(msg);
-        Alert.alert("Authentication Error", msg);
+        Alert.alert("Upload Error", "You must be logged in to upload photos.");
         return null;
       }
 
-      if (!targetTripId) {
-        const msg = "A valid tripId is required to upload photos.";
-        setError(msg);
-        Alert.alert("Upload Error", msg);
-        return null;
-      }
-
-      // 1. Request Media Library Permissions
       const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
       if (status !== "granted") {
-        Alert.alert(
-          "Permission Required",
-          "Please grant photo library access in your device settings to select photos."
-        );
+        Alert.alert("Permission Required", "Please allow photo library access to upload photos.");
         return null;
       }
 
-      // 2. Batch Image Selection with EXIF enabled
       const pickerResult = await ImagePicker.launchImageLibraryAsync({
         mediaTypes: ["images"],
         allowsMultipleSelection: true,
         exif: true,
-        quality: 1, // Keep full quality for initial EXIF read
+        quality: 1,
       });
 
       if (pickerResult.canceled || !pickerResult.assets || pickerResult.assets.length === 0) {
         return null;
       }
 
-      const totalAssets = pickerResult.assets.length;
+      const assets = pickerResult.assets;
+      const totalAssets = assets.length;
       setUploading(true);
       setError(null);
       setProgress({ current: 0, total: totalAssets, percentage: 0 });
 
-      const uploadedBatch: Photo[] = [];
+      const batchResults: Photo[] = [];
+      let completedCount = 0;
+      let failedCount = 0;
 
-      try {
-        for (let i = 0; i < totalAssets; i++) {
-          const asset = pickerResult.assets[i];
-
-          // STEP A: EXIF Extraction FIRST (before compression strips metadata)
+      // Process single photo pipeline
+      const processSingleAsset = async (asset: ImagePicker.ImagePickerAsset, index: number) => {
+        try {
+          // 1. Extract EXIF metadata
           const exifData = extractExifMetadata(asset.exif);
 
-          // STEP B: Aggressive Client-Side Compression (with base64 for recognition and instant caching)
+          // 2. High-Quality Compressed Image (max 1400px, 70% quality for storage)
           const maxDimension = 1400;
           const manipActions: ImageManipulator.Action[] = [];
-
           if (asset.width && asset.height) {
             if (asset.width > maxDimension || asset.height > maxDimension) {
               if (asset.width >= asset.height) {
@@ -205,58 +209,48 @@ export function useBatchUpload(defaultTripId?: string) {
             manipActions.push({ resize: { width: maxDimension } });
           }
 
-          const compressed = await ImageManipulator.manipulateAsync(
-            asset.uri,
-            manipActions,
-            {
-              compress: 0.7, // Aggressive compression protects 1GB quota
-              format: ImageManipulator.SaveFormat.JPEG,
-              base64: true, // Used for instant landmark recognition and zero-latency local caching
-            }
-          );
+          // 3. Run high-quality storage compression and fast lightweight AI thumbnail in parallel
+          const [compressed, thumbCompressed] = await Promise.all([
+            ImageManipulator.manipulateAsync(
+              asset.uri,
+              manipActions,
+              { compress: 0.7, format: ImageManipulator.SaveFormat.JPEG, base64: true }
+            ),
+            options?.autoTag !== false
+              ? ImageManipulator.manipulateAsync(
+                  asset.uri,
+                  [{ resize: { width: 512 } }], // 512px lightweight thumbnail makes Vision AI 4x faster
+                  { compress: 0.4, format: ImageManipulator.SaveFormat.JPEG, base64: true }
+                )
+              : Promise.resolve(null),
+          ]);
 
-          // STEP C: Automated Landmark Recognition (Vision AI + GPS POI Lookup + ML Kit)
-          let detectedLandmark: string | null = null;
-          let detectedTags: string[] = [];
-          if (options?.autoTag !== false) {
-            try {
-              const recognition = await recognizeLandmarksAndLabels(compressed.uri, {
-                base64: compressed.base64,
-                gps: exifData.lat && exifData.lng ? { lat: exifData.lat, lng: exifData.lng } : null,
-                cityName: options?.cityName,
-              });
-              detectedLandmark = recognition.landmark;
-              detectedTags = recognition.tags;
-            } catch (tagErr) {
-              console.log("[useBatchUpload] Landmark recognition notice:", tagErr);
-            }
-          }
-
-          // STEP D: Storage Upload to Supabase "photos" bucket
-          const response = await fetch(compressed.uri);
-          const blob = await response.blob();
-
+          // 4. Run automated landmark recognition and prepare storage blob simultaneously
           const randomSuffix = Math.random().toString(36).substring(2, 9);
-          const fileName = Date.now() + "_" + i + "_" + randomSuffix + ".jpg";
-          const storagePath = user.id + "/" + targetTripId + "/" + fileName;
+          const fileName = `${Date.now()}_${index}_${randomSuffix}.jpg`;
+          const storagePath = `${user.id}/${targetTripId}/${fileName}`;
 
-          const { error: uploadError } = await supabase.storage
-            .from("photos")
-            .upload(storagePath, blob, {
-              contentType: "image/jpeg",
-              upsert: false,
-            });
+          const [recognitionResult, blob] = await Promise.all([
+            options?.autoTag !== false && thumbCompressed?.base64
+              ? recognizeLandmarksAndLabels(compressed.uri, {
+                  base64: thumbCompressed.base64,
+                  gps: exifData.lat && exifData.lng ? { lat: exifData.lat, lng: exifData.lng } : null,
+                  cityName: options?.cityName,
+                }).catch(() => ({ landmark: null, tags: [] }))
+              : Promise.resolve({ landmark: null, tags: [] }),
+            fetch(compressed.uri).then((r) => r.blob()),
+          ]);
 
-          if (uploadError) {
-            throw new Error("Failed to upload photo " + (i + 1) + ": " + uploadError.message);
-          }
+          const detectedLandmark = recognitionResult.landmark;
+          const detectedTags = recognitionResult.tags || [];
+          const landmarkList = detectedLandmark ? [detectedLandmark] : detectedTags.slice(0, 2);
+
+          // 5. Upload compressed image with retry
+          await uploadToStorageWithRetry(storagePath, blob);
 
           const { data: { publicUrl } } = supabase.storage.from("photos").getPublicUrl(storagePath);
 
-          const landmarkList = detectedLandmark ? [detectedLandmark] : detectedTags.slice(0, 2);
-
-          // STEP E: Database Sync - insert into photos table with EXIF, landmark tags and coordinates
-          let photoRow: any = null;
+          // 6. Insert photo record with fallback for schema
           const fullPayload: any = {
             trip_id: targetTripId,
             user_id: user.id,
@@ -278,6 +272,7 @@ export function useBatchUpload(defaultTripId?: string) {
             },
           };
 
+          let photoRow: any = null;
           const { data: insertedData, error: dbError } = await supabase
             .from("photos")
             .insert(fullPayload)
@@ -285,7 +280,6 @@ export function useBatchUpload(defaultTripId?: string) {
             .single();
 
           if (dbError) {
-            // If the database schema has not added the 'lat' column yet, fallback to base columns
             if (dbError.message?.includes("lat") || dbError.message?.includes("schema cache")) {
               const fallbackPayload = {
                 trip_id: targetTripId,
@@ -299,19 +293,16 @@ export function useBatchUpload(defaultTripId?: string) {
                 .insert(fallbackPayload)
                 .select()
                 .single();
-
-              if (fallbackError) {
-                throw new Error("Failed to save photo record: " + fallbackError.message);
-              }
+              if (fallbackError) throw new Error(fallbackError.message);
               photoRow = fallbackData;
             } else {
-              throw new Error("Failed to save photo record " + (i + 1) + ": " + dbError.message);
+              throw new Error(dbError.message);
             }
           } else {
             photoRow = insertedData;
           }
 
-          // Write directly to local FileSystem cache so image renders instantly without network delay
+          // 7. Write to local cache for instantaneous rendering
           const localCacheUri = `${FileSystem.cacheDirectory}td-${photoRow.id}.jpg`;
           try {
             if (compressed.base64) {
@@ -319,11 +310,11 @@ export function useBatchUpload(defaultTripId?: string) {
             } else {
               await FileSystem.copyAsync({ from: compressed.uri, to: localCacheUri });
             }
-          } catch (cacheErr) {
-            console.log("[useBatchUpload] local cache write notice:", cacheErr);
+          } catch (cErr) {
+            console.log("[useBatchUpload] cache write notice:", cErr);
           }
 
-          // Auto-insert detected landmark into landmarks highlights table if found
+          // 8. Auto-insert detected landmark into landmarks highlights table
           if (detectedLandmark) {
             try {
               await supabase.from("landmarks").insert({
@@ -334,39 +325,48 @@ export function useBatchUpload(defaultTripId?: string) {
                 source: "ai",
               });
             } catch (landmarkErr) {
-              console.log("[useBatchUpload] Landmark insert notice:", landmarkErr);
+              console.log("[useBatchUpload] landmark insert notice:", landmarkErr);
             }
           }
 
-          const insertedPhoto = photoRow as Photo;
-          uploadedBatch.push(insertedPhoto);
-
-          // Update progress
-          const currentCount = i + 1;
-          const currentPercentage = Math.round((currentCount / totalAssets) * 100);
-          setProgress({
-            current: currentCount,
-            total: totalAssets,
-            percentage: currentPercentage,
-          });
+          const savedPhoto: Photo = photoRow as Photo;
+          batchResults.push(savedPhoto);
 
           if (options?.onPhotoUploaded) {
-            options.onPhotoUploaded(insertedPhoto, currentCount, totalAssets);
+            options.onPhotoUploaded(savedPhoto, completedCount + 1, totalAssets);
           }
+        } catch (itemErr: any) {
+          console.warn(`[useBatchUpload] Photo ${index + 1} upload failed:`, itemErr?.message || itemErr);
+          failedCount++;
+        } finally {
+          completedCount++;
+          const pct = Math.round((completedCount / totalAssets) * 100);
+          setProgress({ current: completedCount, total: totalAssets, percentage: pct });
         }
+      };
 
-        setUploadedPhotos((prev) => [...uploadedBatch, ...prev]);
-        return uploadedBatch;
-      } catch (err: any) {
-        const errorMsg = err.message || "An unexpected error occurred during batch upload.";
-        setError(errorMsg);
-        Alert.alert("Upload Incomplete", errorMsg);
-        return uploadedBatch.length > 0 ? uploadedBatch : null;
-      } finally {
-        setUploading(false);
+      // Execute in parallel chunks of 2 concurrent workers for speed and reliability
+      const CONCURRENCY = 2;
+      for (let i = 0; i < assets.length; i += CONCURRENCY) {
+        const chunk = assets.slice(i, i + CONCURRENCY);
+        await Promise.all(chunk.map((asset, offset) => processSingleAsset(asset, i + offset)));
       }
+
+      setUploading(false);
+      setUploadedPhotos((prev) => [...batchResults, ...prev]);
+
+      if (failedCount > 0 && batchResults.length > 0) {
+        Alert.alert(
+          "Upload Summary",
+          `${batchResults.length} of ${totalAssets} photos uploaded successfully. ${failedCount} photo(s) had a network error and were skipped.`
+        );
+      } else if (failedCount > 0 && batchResults.length === 0) {
+        Alert.alert("Upload Failed", "Could not upload photos due to a network connection issue. Please try again.");
+      }
+
+      return batchResults;
     },
-    [user, defaultTripId]
+    [defaultTripId, user]
   );
 
   return {

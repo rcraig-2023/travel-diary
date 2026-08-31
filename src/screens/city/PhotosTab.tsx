@@ -40,6 +40,13 @@ export default function PhotosTab({ tripId, cityName, country }: Props) {
   const [loading, setLoading] = useState(true);
   const [selectedPhoto, setSelectedPhoto] = useState<DisplayPhoto | null>(null);
 
+  // Tag & Landmark Editing state
+  const [isEditing, setIsEditing] = useState(false);
+  const [editLandmark, setEditLandmark] = useState('');
+  const [editTags, setEditTags] = useState<string[]>([]);
+  const [newTagText, setNewTagText] = useState('');
+  const [savingEdits, setSavingEdits] = useState(false);
+
   // Hook for batch uploading, EXIF extraction, compression, and automated landmark tagging
   const { pickAndUpload, uploading, progress } = useBatchUpload(tripId);
 
@@ -182,6 +189,84 @@ export default function PhotosTab({ tripId, cityName, country }: Props) {
     }
   };
 
+  const startEditing = (photo: DisplayPhoto) => {
+    setEditLandmark(photo.landmarks?.[0] || '');
+    setEditTags([...(photo.tags || [])]);
+    setNewTagText('');
+    setIsEditing(true);
+  };
+
+  const handleAddTag = () => {
+    const trimmed = newTagText.trim();
+    if (!trimmed) return;
+    if (!editTags.includes(trimmed)) {
+      setEditTags([...editTags, trimmed]);
+    }
+    setNewTagText('');
+  };
+
+  const handleRemoveTag = (tagToRemove: string) => {
+    setEditTags(editTags.filter((t) => t !== tagToRemove));
+  };
+
+  const handleSaveEdits = async () => {
+    if (!selectedPhoto) return;
+    setSavingEdits(true);
+
+    const cleanLandmark = editLandmark.trim();
+    const updatedLandmarks = cleanLandmark ? [cleanLandmark] : [];
+    const updatedTags = editTags.map((t) => t.trim()).filter(Boolean);
+
+    try {
+      const { error: dbError } = await supabase
+        .from('photos')
+        .update({
+          ai_tags: {
+            landmarks: updatedLandmarks,
+            restaurants: [],
+            tags: updatedTags,
+            exif: {
+              lat: selectedPhoto.lat,
+              lng: selectedPhoto.lng,
+              taken_at: selectedPhoto.takenAt,
+            },
+          },
+        })
+        .eq('id', selectedPhoto.id);
+
+      if (dbError) throw new Error(dbError.message);
+
+      // If a landmark was added or changed, also sync it to highlights table
+      if (cleanLandmark) {
+        await supabase.from('landmarks').insert({
+          trip_id: tripId,
+          user_id: user!.id,
+          name: cleanLandmark,
+          visited: true,
+          source: 'manual',
+        });
+      }
+
+      // Update local state
+      const updatedPhotoItem: DisplayPhoto = {
+        ...selectedPhoto,
+        landmarks: updatedLandmarks,
+        tags: updatedTags,
+      };
+
+      setSelectedPhoto(updatedPhotoItem);
+      setPhotos((prev) =>
+        prev.map((p) => (p.id === selectedPhoto.id ? updatedPhotoItem : p))
+      );
+      setIsEditing(false);
+      Alert.alert('Saved', 'Photo tags and landmark updated successfully.');
+    } catch (err: any) {
+      Alert.alert('Error', err.message || 'Failed to save edits.');
+    } finally {
+      setSavingEdits(false);
+    }
+  };
+
   const deletePhoto = (item: DisplayPhoto) => {
     Alert.alert('Delete Photo', 'Remove this photo from your trip diary?', [
       { text: 'Cancel', style: 'cancel' },
@@ -201,7 +286,10 @@ export default function PhotosTab({ tripId, cityName, country }: Props) {
             }
           }
           setPhotos((prev) => prev.filter((p) => p.id !== item.id));
-          if (selectedPhoto?.id === item.id) setSelectedPhoto(null);
+          if (selectedPhoto?.id === item.id) {
+            setSelectedPhoto(null);
+            setIsEditing(false);
+          }
         },
       },
     ]);
@@ -225,10 +313,10 @@ export default function PhotosTab({ tripId, cityName, country }: Props) {
           <ActivityIndicator color="#00A699" size="small" />
           <View style={{ flex: 1, marginLeft: 10 }}>
             <Text style={styles.progressTitle}>
-              Uploading {progress.current} of {progress.total} photos ({progress.percentage}%)
+              Uploading & Tagging {progress.current} of {progress.total} photos ({progress.percentage}%)
             </Text>
             <Text style={styles.progressSubtitle}>
-              🏷️ Extracting EXIF metadata & scanning landmarks...
+              ⚡ High-speed compression & Vision AI scanning...
             </Text>
           </View>
         </View>
@@ -252,7 +340,10 @@ export default function PhotosTab({ tripId, cityName, country }: Props) {
               <TouchableOpacity
                 style={styles.photoCard}
                 activeOpacity={0.85}
-                onPress={() => setSelectedPhoto(item)}
+                onPress={() => {
+                  setSelectedPhoto(item);
+                  setIsEditing(false);
+                }}
               >
                 <Image
                   source={{ uri: item.uri }}
@@ -325,24 +416,30 @@ export default function PhotosTab({ tripId, cityName, country }: Props) {
         </TouchableOpacity>
       </View>
 
-      {/* Full-Screen Photo Details Modal */}
+      {/* Full-Screen Photo Details & Tag Editor Modal */}
       <Modal
         visible={!!selectedPhoto}
         animationType="fade"
         transparent
-        onRequestClose={() => setSelectedPhoto(null)}
+        onRequestClose={() => {
+          setSelectedPhoto(null);
+          setIsEditing(false);
+        }}
       >
         <View style={styles.modalBackdrop}>
           <View style={styles.modalContent}>
             <TouchableOpacity
               style={styles.modalCloseBtn}
-              onPress={() => setSelectedPhoto(null)}
+              onPress={() => {
+                setSelectedPhoto(null);
+                setIsEditing(false);
+              }}
             >
               <Text style={styles.modalCloseText}>✕</Text>
             </TouchableOpacity>
 
             {selectedPhoto && (
-              <ScrollView contentContainerStyle={styles.modalScroll}>
+              <ScrollView contentContainerStyle={styles.modalScroll} keyboardShouldPersistTaps="handled">
                 <Image
                   source={{ uri: selectedPhoto.uri }}
                   style={styles.modalImage}
@@ -350,59 +447,144 @@ export default function PhotosTab({ tripId, cityName, country }: Props) {
                 />
 
                 <View style={styles.modalInfoBox}>
-                  {/* Top Landmarks */}
-                  {selectedPhoto.landmarks && selectedPhoto.landmarks.length > 0 && (
-                    <View style={styles.modalSection}>
-                      <Text style={styles.modalSectionLabel}>🏛️ RECOGNIZED LANDMARK</Text>
-                      <View style={styles.tagWrap}>
-                        {selectedPhoto.landmarks.map((lm, idx) => (
-                          <View key={idx} style={styles.landmarkChip}>
-                            <Text style={styles.landmarkChipText}>📍 {lm}</Text>
-                          </View>
-                        ))}
-                      </View>
-                    </View>
-                  )}
+                  {/* EDIT MODE */}
+                  {isEditing ? (
+                    <View style={styles.editSection}>
+                      <Text style={styles.modalSectionLabel}>🏛️ LANDMARK NAME</Text>
+                      <TextInput
+                        style={styles.editInput}
+                        value={editLandmark}
+                        onChangeText={setEditLandmark}
+                        placeholder="e.g. Notre-Dame de Paris, Eiffel Tower"
+                        placeholderTextColor="#9CA3AF"
+                      />
 
-                  {/* All Scenery Tags */}
-                  {selectedPhoto.tags && selectedPhoto.tags.length > 0 && (
-                    <View style={styles.modalSection}>
-                      <Text style={styles.modalSectionLabel}>🏷️ SCENERY & OBJECT TAGS</Text>
+                      <Text style={[styles.modalSectionLabel, { marginTop: 14 }]}>🏷️ PHOTO TAGS</Text>
                       <View style={styles.tagWrap}>
-                        {selectedPhoto.tags.map((tag, idx) => (
-                          <View key={idx} style={styles.tagChip}>
+                        {editTags.map((tag, idx) => (
+                          <View key={idx} style={styles.tagChipEditable}>
                             <Text style={styles.tagChipText}>{tag}</Text>
+                            <TouchableOpacity
+                              style={styles.tagRemoveBtn}
+                              onPress={() => handleRemoveTag(tag)}
+                            >
+                              <Text style={styles.tagRemoveText}>✕</Text>
+                            </TouchableOpacity>
                           </View>
                         ))}
                       </View>
+
+                      {/* Add Custom Tag Row */}
+                      <View style={styles.addTagRow}>
+                        <TextInput
+                          style={styles.addTagInput}
+                          value={newTagText}
+                          onChangeText={setNewTagText}
+                          placeholder="Add new tag..."
+                          placeholderTextColor="#9CA3AF"
+                          onSubmitEditing={handleAddTag}
+                          returnKeyType="done"
+                        />
+                        <TouchableOpacity style={styles.addTagBtn} onPress={handleAddTag}>
+                          <Text style={styles.addTagBtnText}>+ Add</Text>
+                        </TouchableOpacity>
+                      </View>
+
+                      {/* Edit Actions */}
+                      <View style={styles.editActionRow}>
+                        <TouchableOpacity
+                          style={styles.cancelEditBtn}
+                          onPress={() => setIsEditing(false)}
+                          disabled={savingEdits}
+                        >
+                          <Text style={styles.cancelEditText}>Cancel</Text>
+                        </TouchableOpacity>
+
+                        <TouchableOpacity
+                          style={styles.saveEditBtn}
+                          onPress={handleSaveEdits}
+                          disabled={savingEdits}
+                        >
+                          {savingEdits ? (
+                            <ActivityIndicator color="#fff" size="small" />
+                          ) : (
+                            <Text style={styles.saveEditText}>✓ Save Changes</Text>
+                          )}
+                        </TouchableOpacity>
+                      </View>
                     </View>
+                  ) : (
+                    /* VIEW MODE */
+                    <>
+                      <View style={styles.viewHeaderRow}>
+                        <Text style={styles.viewTitle}>Photo Details</Text>
+                        <TouchableOpacity
+                          style={styles.editPillBtn}
+                          onPress={() => startEditing(selectedPhoto)}
+                        >
+                          <Text style={styles.editPillText}>✎ Edit Tags</Text>
+                        </TouchableOpacity>
+                      </View>
+
+                      {/* Top Landmarks */}
+                      {selectedPhoto.landmarks && selectedPhoto.landmarks.length > 0 ? (
+                        <View style={styles.modalSection}>
+                          <Text style={styles.modalSectionLabel}>🏛️ RECOGNIZED LANDMARK</Text>
+                          <View style={styles.tagWrap}>
+                            {selectedPhoto.landmarks.map((lm, idx) => (
+                              <View key={idx} style={styles.landmarkChip}>
+                                <Text style={styles.landmarkChipText}>📍 {lm}</Text>
+                              </View>
+                            ))}
+                          </View>
+                        </View>
+                      ) : null}
+
+                      {/* All Scenery Tags */}
+                      {selectedPhoto.tags && selectedPhoto.tags.length > 0 ? (
+                        <View style={styles.modalSection}>
+                          <Text style={styles.modalSectionLabel}>🏷️ SCENERY & OBJECT TAGS</Text>
+                          <View style={styles.tagWrap}>
+                            {selectedPhoto.tags.map((tag, idx) => (
+                              <View key={idx} style={styles.tagChip}>
+                                <Text style={styles.tagChipText}>{tag}</Text>
+                              </View>
+                            ))}
+                          </View>
+                        </View>
+                      ) : (
+                        <View style={styles.noTagsBox}>
+                          <Text style={styles.noTagsText}>No tags yet. Tap "Edit Tags" above to add some!</Text>
+                        </View>
+                      )}
+
+                      {/* EXIF Date & Coordinates */}
+                      <View style={styles.metaRow}>
+                        {selectedPhoto.takenAt ? (
+                          <View style={styles.metaItem}>
+                            <Text style={styles.metaLabel}>TAKEN ON</Text>
+                            <Text style={styles.metaValue}>{formatPhotoDate(selectedPhoto.takenAt)}</Text>
+                          </View>
+                        ) : null}
+
+                        {selectedPhoto.lat && selectedPhoto.lng ? (
+                          <View style={styles.metaItem}>
+                            <Text style={styles.metaLabel}>GPS COORDINATES</Text>
+                            <Text style={styles.metaValue}>
+                              {selectedPhoto.lat.toFixed(4)}°, {selectedPhoto.lng.toFixed(4)}°
+                            </Text>
+                          </View>
+                        ) : null}
+                      </View>
+
+                      <TouchableOpacity
+                        style={styles.modalDeleteBtn}
+                        onPress={() => selectedPhoto && deletePhoto(selectedPhoto)}
+                      >
+                        <Text style={styles.modalDeleteText}>🗑 Delete Photo</Text>
+                      </TouchableOpacity>
+                    </>
                   )}
-
-                  {/* EXIF Date & Coordinates */}
-                  <View style={styles.metaRow}>
-                    {selectedPhoto.takenAt ? (
-                      <View style={styles.metaItem}>
-                        <Text style={styles.metaLabel}>TAKEN ON</Text>
-                        <Text style={styles.metaValue}>{formatPhotoDate(selectedPhoto.takenAt)}</Text>
-                      </View>
-                    ) : null}
-
-                    {selectedPhoto.lat && selectedPhoto.lng ? (
-                      <View style={styles.metaItem}>
-                        <Text style={styles.metaLabel}>GPS COORDINATES</Text>
-                        <Text style={styles.metaValue}>
-                          {selectedPhoto.lat.toFixed(4)}°, {selectedPhoto.lng.toFixed(4)}°
-                        </Text>
-                      </View>
-                    ) : null}
-                  </View>
-
-                  <TouchableOpacity
-                    style={styles.modalDeleteBtn}
-                    onPress={() => selectedPhoto && deletePhoto(selectedPhoto)}
-                  >
-                    <Text style={styles.modalDeleteText}>🗑 Delete Photo</Text>
-                  </TouchableOpacity>
                 </View>
               </ScrollView>
             )}
@@ -594,4 +776,111 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   modalDeleteText: { color: '#DC2626', fontSize: 15, fontWeight: '700' },
+
+  // Edit Mode Styles
+  viewHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  viewTitle: { fontSize: 18, fontWeight: 'bold', color: '#111827' },
+  editPillBtn: {
+    backgroundColor: '#F3F4F6',
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+  },
+  editPillText: { fontSize: 12, fontWeight: '700', color: '#1F2937' },
+  editSection: { marginBottom: 12 },
+  editInput: {
+    backgroundColor: '#F9FAFB',
+    borderWidth: 1,
+    borderColor: '#D1D5DB',
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    fontSize: 14,
+    color: '#111827',
+    marginTop: 4,
+    marginBottom: 8,
+  },
+  tagChipEditable: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F3F4F6',
+    paddingVertical: 6,
+    paddingLeft: 10,
+    paddingRight: 6,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+  },
+  tagRemoveBtn: {
+    marginLeft: 6,
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: '#D1D5DB',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  tagRemoveText: { fontSize: 10, color: '#374151', fontWeight: 'bold' },
+  addTagRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 10,
+    marginBottom: 16,
+    gap: 8,
+  },
+  addTagInput: {
+    flex: 1,
+    backgroundColor: '#F9FAFB',
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    fontSize: 13,
+    color: '#111827',
+  },
+  addTagBtn: {
+    backgroundColor: '#111827',
+    paddingVertical: 9,
+    paddingHorizontal: 14,
+    borderRadius: 12,
+  },
+  addTagBtnText: { color: '#fff', fontSize: 13, fontWeight: '700' },
+  editActionRow: {
+    flexDirection: 'row',
+    gap: 10,
+    marginTop: 10,
+  },
+  cancelEditBtn: {
+    flex: 1,
+    backgroundColor: '#F3F4F6',
+    paddingVertical: 14,
+    borderRadius: 14,
+    alignItems: 'center',
+  },
+  cancelEditText: { color: '#4B5563', fontSize: 14, fontWeight: '700' },
+  saveEditBtn: {
+    flex: 2,
+    backgroundColor: '#0F766E',
+    paddingVertical: 14,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  saveEditText: { color: '#fff', fontSize: 14, fontWeight: '700' },
+  noTagsBox: {
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    backgroundColor: '#F9FAFB',
+    borderRadius: 12,
+    marginBottom: 14,
+  },
+  noTagsText: { fontSize: 12, color: '#9CA3AF', fontStyle: 'italic' },
 });
