@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View, Text, TouchableOpacity, StyleSheet, Alert, Modal,
   TextInput, ScrollView, ActivityIndicator,
@@ -6,8 +6,15 @@ import {
 import { useRoute, useNavigation, RouteProp } from '@react-navigation/native';
 import { supabase } from '../lib/supabase';
 import { Trip } from '../types';
-import { formatTripDateRange, addDaysToDate } from '../utils/dateUtils';
-import PhotosTab from './city/PhotosTab';
+import {
+  formatTripDateRange,
+  addDaysToDate,
+  computePhotoDateBounds,
+  evaluateTripDateSync,
+  PhotoDateBounds,
+  TripDateSyncAnalysis,
+} from '../utils/dateUtils';
+import PhotosTab, { DisplayPhoto } from './city/PhotosTab';
 import JotsTab from './city/JotsTab';
 import LandmarksTab from './city/LandmarksTab';
 import RestaurantsTab from './city/RestaurantsTab';
@@ -25,16 +32,85 @@ export default function CityScreen() {
   const [trip, setTrip] = useState<Trip>(initialTrip);
   const [activeTab, setActiveTab] = useState<Tab>('Photos');
 
+  // Photo Date Range Sync State
+  const [photoBounds, setPhotoBounds] = useState<PhotoDateBounds | null>(null);
+  const [syncAnalysis, setSyncAnalysis] = useState<TripDateSyncAnalysis | null>(null);
+  const [bannerDismissed, setBannerDismissed] = useState(false);
+
   // Edit Date State
   const [showDateModal, setShowDateModal] = useState(false);
   const [editStartDate, setEditStartDate] = useState(trip.visit_date || '');
   const [editEndDate, setEditEndDate] = useState(trip.end_date || '');
   const [savingDate, setSavingDate] = useState(false);
 
+  // Fetch initial photo bounds from Supabase on mount
+  useEffect(() => {
+    async function loadPhotoDates() {
+      try {
+        const { data } = await supabase
+          .from('photos')
+          .select('taken_at')
+          .eq('trip_id', trip.id)
+          .not('taken_at', 'is', null);
+
+        if (data && data.length > 0) {
+          const bounds = computePhotoDateBounds(data.map((d) => ({ takenAt: d.taken_at })));
+          if (bounds) {
+            setPhotoBounds(bounds);
+            setSyncAnalysis(evaluateTripDateSync(trip, bounds));
+          }
+        }
+      } catch (e) {
+        console.log('[CityScreen] loadPhotoDates notice:', e);
+      }
+    }
+    loadPhotoDates();
+  }, [trip.id]);
+
+  const handlePhotosLoaded = (loadedPhotos: DisplayPhoto[]) => {
+    const bounds = computePhotoDateBounds(loadedPhotos);
+    setPhotoBounds(bounds);
+    setSyncAnalysis(evaluateTripDateSync(trip, bounds));
+  };
+
   const openDateModal = () => {
     setEditStartDate(trip.visit_date || '');
     setEditEndDate(trip.end_date || '');
     setShowDateModal(true);
+  };
+
+  const applySuggestedDates = async (start: string, end: string) => {
+    setSavingDate(true);
+    try {
+      const cleanStart = start.trim() || null;
+      const cleanEnd = end.trim() || null;
+      const { error } = await supabase
+        .from('trips')
+        .update({
+          visit_date: cleanStart,
+          end_date: cleanEnd,
+        })
+        .eq('id', trip.id);
+
+      if (error) {
+        Alert.alert('Update Failed', error.message);
+        return;
+      }
+
+      setTrip((prev) => ({
+        ...prev,
+        visit_date: cleanStart,
+        end_date: cleanEnd,
+      }));
+      setEditStartDate(cleanStart || '');
+      setEditEndDate(cleanEnd || '');
+      setBannerDismissed(true);
+      Alert.alert('Dates Updated', `Trip dates updated to ${formatTripDateRange(cleanStart, cleanEnd)}.`);
+    } catch (err: any) {
+      Alert.alert('Error', err.message || 'Could not update trip dates.');
+    } finally {
+      setSavingDate(false);
+    }
   };
 
   const saveDates = async () => {
@@ -117,6 +193,57 @@ export default function CityScreen() {
         </TouchableOpacity>
       </View>
 
+      {/* Smart Photo Date Suggestion Banner */}
+      {!bannerDismissed &&
+        syncAnalysis &&
+        (syncAnalysis.status === 'DEFAULT_PLACEHOLDER' ||
+          syncAnalysis.status === 'EXPAND' ||
+          syncAnalysis.status === 'OUT_OF_BOUNDS') && (
+          <View style={styles.suggestionBanner}>
+            <View style={styles.suggestionContent}>
+              <Text style={styles.suggestionIcon}>💡</Text>
+              <View style={{ flex: 1, marginHorizontal: 8 }}>
+                <Text style={styles.suggestionTitle}>
+                  {syncAnalysis.status === 'DEFAULT_PLACEHOLDER'
+                    ? 'Photo Dates Detected'
+                    : syncAnalysis.status === 'EXPAND'
+                    ? 'Extend Trip Dates'
+                    : 'Update Trip Dates'}
+                </Text>
+                <Text style={styles.suggestionText}>
+                  {syncAnalysis.message ||
+                    `Photos were taken on ${formatTripDateRange(
+                      syncAnalysis.suggestedStartDate,
+                      syncAnalysis.suggestedEndDate
+                    )}. Update trip date?`}
+                </Text>
+              </View>
+              <TouchableOpacity
+                style={styles.suggestionDismissBtn}
+                onPress={() => setBannerDismissed(true)}
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+              >
+                <Text style={styles.suggestionDismissText}>✕</Text>
+              </TouchableOpacity>
+            </View>
+            <View style={styles.suggestionActionsRow}>
+              <TouchableOpacity
+                style={styles.suggestionActionBtn}
+                onPress={() =>
+                  applySuggestedDates(
+                    syncAnalysis.suggestedStartDate,
+                    syncAnalysis.suggestedEndDate
+                  )
+                }
+              >
+                <Text style={styles.suggestionActionBtnText}>
+                  ✓ Update to {formatTripDateRange(syncAnalysis.suggestedStartDate, syncAnalysis.suggestedEndDate)}
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        )}
+
       <View style={styles.tabBar}>
         {TABS.map((tab) => (
           <TouchableOpacity
@@ -137,6 +264,7 @@ export default function CityScreen() {
             tripId={trip.id}
             cityName={trip.city_name}
             country={trip.country}
+            onPhotosLoaded={handlePhotosLoaded}
           />
         )}
         {activeTab === 'Jots' && <JotsTab tripId={trip.id} />}
@@ -175,6 +303,28 @@ export default function CityScreen() {
                 🗓️ {formatTripDateRange(editStartDate, editEndDate) || 'No dates set'}
               </Text>
             </View>
+
+            {photoBounds && photoBounds.totalWithDates > 0 ? (
+              <View style={styles.photoBoundsBox}>
+                <View style={styles.photoBoundsHeader}>
+                  <Text style={styles.photoBoundsIcon}>📸</Text>
+                  <Text style={styles.photoBoundsLabel}>TIMELINE FROM UPLOADED PHOTOS</Text>
+                </View>
+                <Text style={styles.photoBoundsValue}>
+                  {formatTripDateRange(photoBounds.minDate, photoBounds.maxDate)} ({photoBounds.totalWithDates} {photoBounds.totalWithDates === 1 ? 'photo' : 'photos'})
+                </Text>
+                <TouchableOpacity
+                  style={styles.applyPhotoDateBtn}
+                  onPress={() => {
+                    setEditStartDate(photoBounds.minDate);
+                    setEditEndDate(photoBounds.minDate === photoBounds.maxDate ? '' : photoBounds.maxDate);
+                  }}
+                  activeOpacity={0.8}
+                >
+                  <Text style={styles.applyPhotoDateText}>⚡ Use Photo Dates</Text>
+                </TouchableOpacity>
+              </View>
+            ) : null}
 
             <Text style={styles.inputLabel}>START DATE</Text>
             <TextInput
@@ -407,6 +557,103 @@ const styles = StyleSheet.create({
   saveBtnText: {
     color: '#fff',
     fontSize: 16,
+    fontWeight: '700',
+  },
+
+  // Suggestion Banner Styles
+  suggestionBanner: {
+    backgroundColor: '#FFFBEB',
+    borderBottomWidth: 1,
+    borderBottomColor: '#FDE68A',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+  },
+  suggestionContent: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+  },
+  suggestionIcon: {
+    fontSize: 18,
+    marginTop: 2,
+  },
+  suggestionTitle: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#92400E',
+    marginBottom: 2,
+  },
+  suggestionText: {
+    fontSize: 12,
+    color: '#78350F',
+    lineHeight: 17,
+  },
+  suggestionDismissBtn: {
+    padding: 4,
+    marginLeft: 4,
+  },
+  suggestionDismissText: {
+    fontSize: 13,
+    color: '#B45309',
+    fontWeight: 'bold',
+  },
+  suggestionActionsRow: {
+    marginTop: 10,
+    flexDirection: 'row',
+    justifyContent: 'flex-start',
+  },
+  suggestionActionBtn: {
+    backgroundColor: '#D97706',
+    paddingVertical: 7,
+    paddingHorizontal: 14,
+    borderRadius: 16,
+    alignSelf: 'flex-start',
+  },
+  suggestionActionBtnText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+
+  // Photo Bounds Box in Modal
+  photoBoundsBox: {
+    backgroundColor: '#F0FDF4',
+    borderRadius: 14,
+    padding: 14,
+    marginBottom: 16,
+    borderWidth: 1,
+    borderColor: '#BBF7D0',
+  },
+  photoBoundsHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 4,
+  },
+  photoBoundsIcon: {
+    fontSize: 14,
+    marginRight: 6,
+  },
+  photoBoundsLabel: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#15803D',
+    letterSpacing: 0.5,
+  },
+  photoBoundsValue: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#166534',
+    marginBottom: 10,
+  },
+  applyPhotoDateBtn: {
+    backgroundColor: '#15803D',
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    borderRadius: 12,
+    alignSelf: 'flex-start',
+  },
+  applyPhotoDateText: {
+    color: '#fff',
+    fontSize: 12,
     fontWeight: '700',
   },
 });

@@ -14,9 +14,10 @@ type Props = {
   tripId: string;
   cityName?: string;
   country?: string | null;
+  onPhotosLoaded?: (photos: DisplayPhoto[]) => void;
 };
 
-type DisplayPhoto = {
+export type DisplayPhoto = {
   id: string;
   uri: string;
   storagePath?: string;
@@ -38,7 +39,7 @@ type DisplayPhoto = {
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const COLUMN_WIDTH = (SCREEN_WIDTH - 36) / 2;
 
-export default function PhotosTab({ tripId, cityName, country }: Props) {
+export default function PhotosTab({ tripId, cityName, country, onPhotosLoaded }: Props) {
   const { user } = useAuth();
   const [photos, setPhotos] = useState<DisplayPhoto[]>([]);
   const [loading, setLoading] = useState(true);
@@ -151,6 +152,9 @@ export default function PhotosTab({ tripId, cityName, country }: Props) {
         })
       );
       setPhotos(display);
+      if (onPhotosLoaded) {
+        onPhotosLoaded(display);
+      }
     } catch (err) {
       console.log('[Photos] Exception fetching:', err);
     } finally {
