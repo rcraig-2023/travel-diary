@@ -1,17 +1,21 @@
 import { useState, useCallback } from "react";
-import { Alert } from "react-native";
+import { Alert, Platform } from "react-native";
 import * as ImagePicker from "expo-image-picker";
 import * as ImageManipulator from "expo-image-manipulator";
 import * as FileSystem from "expo-file-system/legacy";
 import { supabase } from "../lib/supabase";
 import { useAuth } from "../context/AuthContext";
-import { Photo } from "../types";
+import { Photo, AuthorshipMetadata } from "../types";
 import { recognizeLandmarksAndLabels } from "./useLandmarkRecognition";
 
 export type ExtractedExif = {
   lat: number | null;
   lng: number | null;
   takenAt: string | null;
+  cameraMake?: string | null;
+  cameraModel?: string | null;
+  lensModel?: string | null;
+  software?: string | null;
   rawExif?: Record<string, any>;
 };
 
@@ -100,7 +104,22 @@ export function extractExifMetadata(exif: Record<string, any> | undefined | null
     }
   }
 
-  return { lat, lng, takenAt, rawExif: exif };
+  // 3. Extract Camera Make & Model
+  const cameraMake = exif.Make ?? tiffBlock.Make ?? exifBlock.Make ?? null;
+  const cameraModel = exif.Model ?? tiffBlock.Model ?? exifBlock.Model ?? null;
+  const lensModel = exif.LensModel ?? exifBlock.LensModel ?? null;
+  const software = exif.Software ?? tiffBlock.Software ?? null;
+
+  return {
+    lat,
+    lng,
+    takenAt,
+    cameraMake,
+    cameraModel,
+    lensModel,
+    software,
+    rawExif: exif,
+  };
 }
 
 // Upload with 2 automatic retries for network resilience
@@ -250,7 +269,28 @@ export function useBatchUpload(defaultTripId?: string) {
 
           const { data: { publicUrl } } = supabase.storage.from("photos").getPublicUrl(storagePath);
 
-          // 6. Insert photo record with fallback for schema
+          // 6. Build Comprehensive Authorship & Extracted Tags Metadata
+          const authorName =
+            user.user_metadata?.full_name ||
+            user.user_metadata?.name ||
+            user.user_metadata?.display_name ||
+            (user.email ? user.email.split("@")[0] : "Traveler");
+          const authorEmail = user.email || null;
+
+          const authorshipPayload: AuthorshipMetadata = {
+            author_id: user.id,
+            author_name: authorName,
+            author_email: authorEmail,
+            camera_make: exifData.cameraMake || null,
+            camera_model: exifData.cameraModel || null,
+            lens_model: exifData.lensModel || null,
+            software: exifData.software || null,
+            device_platform: Platform.OS,
+            captured_at: exifData.takenAt || null,
+            uploaded_at: new Date().toISOString(),
+          };
+
+          // 7. Insert photo record with fallback for schema
           const fullPayload: any = {
             trip_id: targetTripId,
             user_id: user.id,
@@ -259,15 +299,23 @@ export function useBatchUpload(defaultTripId?: string) {
             lat: exifData.lat,
             lng: exifData.lng,
             taken_at: exifData.takenAt,
+            author_name: authorName,
+            author_email: authorEmail,
+            camera_model: exifData.cameraModel || null,
             itinerary_item_id: options?.itineraryItemId || null,
             ai_tags: {
               landmarks: landmarkList,
               restaurants: [],
               tags: detectedTags,
+              authorship: authorshipPayload,
               exif: {
                 lat: exifData.lat,
                 lng: exifData.lng,
                 taken_at: exifData.takenAt,
+                camera_make: exifData.cameraMake,
+                camera_model: exifData.cameraModel,
+                lens_model: exifData.lensModel,
+                software: exifData.software,
               },
             },
           };
@@ -280,13 +328,18 @@ export function useBatchUpload(defaultTripId?: string) {
             .single();
 
           if (dbError) {
-            if (dbError.message?.includes("lat") || dbError.message?.includes("schema cache")) {
+            if (
+              dbError.message?.includes("lat") ||
+              dbError.message?.includes("author") ||
+              dbError.message?.includes("camera") ||
+              dbError.message?.includes("schema cache")
+            ) {
               const fallbackPayload = {
                 trip_id: targetTripId,
                 user_id: user.id,
                 storage_path: storagePath,
                 url: publicUrl,
-                ai_tags: fullPayload.ai_tags,
+                ai_tags: fullPayload.ai_tags, // Fully retains authorship and tags in JSONB
               };
               const { data: fallbackData, error: fallbackError } = await supabase
                 .from("photos")
@@ -302,7 +355,7 @@ export function useBatchUpload(defaultTripId?: string) {
             photoRow = insertedData;
           }
 
-          // 7. Write to local cache for instantaneous rendering
+          // 8. Write to local cache for instantaneous rendering
           const localCacheUri = `${FileSystem.cacheDirectory}td-${photoRow.id}.jpg`;
           try {
             if (compressed.base64) {
@@ -314,7 +367,7 @@ export function useBatchUpload(defaultTripId?: string) {
             console.log("[useBatchUpload] cache write notice:", cErr);
           }
 
-          // 8. Auto-insert detected landmark into landmarks highlights table
+          // 9. Auto-insert detected landmark into landmarks highlights table
           if (detectedLandmark) {
             try {
               await supabase.from("landmarks").insert({
@@ -369,8 +422,40 @@ export function useBatchUpload(defaultTripId?: string) {
     [defaultTripId, user]
   );
 
+  const pickAndUploadSingle = useCallback(
+    async (options?: BatchUploadOptions): Promise<Photo | null> => {
+      const targetTripId = options?.tripId || defaultTripId;
+      if (!targetTripId || !user) {
+        Alert.alert("Upload Error", "Authentication and trip ID are required.");
+        return null;
+      }
+
+      const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (status !== "granted") {
+        Alert.alert("Permission Required", "Please allow photo library access to upload photos.");
+        return null;
+      }
+
+      const pickerResult = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ["images"],
+        allowsMultipleSelection: false,
+        exif: true,
+        quality: 1,
+      });
+
+      if (pickerResult.canceled || !pickerResult.assets || pickerResult.assets.length === 0) {
+        return null;
+      }
+
+      const results = await pickAndUpload(options);
+      return results && results.length > 0 ? results[0] : null;
+    },
+    [defaultTripId, pickAndUpload, user]
+  );
+
   return {
     pickAndUpload,
+    pickAndUploadSingle,
     uploading,
     progress,
     error,

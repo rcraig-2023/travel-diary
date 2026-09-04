@@ -66,6 +66,9 @@ create table if not exists photos (
   lat double precision,
   lng double precision,
   taken_at timestamptz,
+  author_name text,
+  author_email text,
+  camera_model text,
   ai_tags jsonb,
   created_at timestamptz default now()
 );
@@ -148,3 +151,14 @@ create policy "Public photo read" on storage.objects
 
 create policy "Users delete own photos" on storage.objects
   for delete using (auth.uid()::text = (storage.foldername(name))[1]);
+
+-- ------------------------------------------------------------------------------
+-- 8. COMPATIBILITY MIGRATIONS FOR EXISTING INSTANCES
+-- ------------------------------------------------------------------------------
+alter table photos add column if not exists lat double precision;
+alter table photos add column if not exists lng double precision;
+alter table photos add column if not exists taken_at timestamptz;
+alter table photos add column if not exists author_name text;
+alter table photos add column if not exists author_email text;
+alter table photos add column if not exists camera_model text;
+alter table photos add column if not exists itinerary_item_id uuid references itinerary_items(id) on delete set null;

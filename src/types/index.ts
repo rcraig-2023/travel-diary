@@ -33,6 +33,19 @@ export type ItineraryItem = {
   created_at: string;
 };
 
+export type AuthorshipMetadata = {
+  author_id: string;
+  author_name: string | null;
+  author_email: string | null;
+  camera_make?: string | null;
+  camera_model?: string | null;
+  lens_model?: string | null;
+  software?: string | null;
+  device_platform?: string;
+  captured_at?: string | null;
+  uploaded_at: string;
+};
+
 export type Photo = {
   id: string;
   trip_id: string;
@@ -43,6 +56,9 @@ export type Photo = {
   lat?: number | null;
   lng?: number | null;
   taken_at?: string | null;
+  author_name?: string | null;
+  author_email?: string | null;
+  camera_model?: string | null;
   ai_tags: AiTags | null;
   created_at: string;
 };
@@ -51,6 +67,8 @@ export type AiTags = {
   landmarks: string[];
   restaurants: string[];
   tags: string[];
+  authorship?: AuthorshipMetadata;
+  exif?: Record<string, any>;
 };
 
 export type Jot = {

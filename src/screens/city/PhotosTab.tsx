@@ -7,7 +7,7 @@ import {
 import * as FileSystem from 'expo-file-system/legacy';
 import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../context/AuthContext';
-import { Photo } from '../../types';
+import { Photo, AuthorshipMetadata } from '../../types';
 import { useBatchUpload } from '../../hooks/useBatchUpload';
 
 type Props = {
@@ -24,6 +24,10 @@ type DisplayPhoto = {
   lat?: number | null;
   lng?: number | null;
   takenAt?: string | null;
+  authorName?: string | null;
+  authorEmail?: string | null;
+  cameraModel?: string | null;
+  authorship?: AuthorshipMetadata | null;
   tags?: string[];
   landmarks?: string[];
   uploading?: boolean;
@@ -47,8 +51,8 @@ export default function PhotosTab({ tripId, cityName, country }: Props) {
   const [newTagText, setNewTagText] = useState('');
   const [savingEdits, setSavingEdits] = useState(false);
 
-  // Hook for batch uploading, EXIF extraction, compression, and automated landmark tagging
-  const { pickAndUpload, uploading, progress } = useBatchUpload(tripId);
+  // Hook for batch & single uploading, EXIF extraction, compression, and automated landmark tagging
+  const { pickAndUpload, pickAndUploadSingle, uploading, progress } = useBatchUpload(tripId);
 
   useEffect(() => {
     fetchPhotos();
@@ -75,6 +79,10 @@ export default function PhotosTab({ tripId, cityName, country }: Props) {
           const localUri = `${FileSystem.cacheDirectory}td-${p.id}.jpg`;
           const photoTags = p.ai_tags?.tags || [];
           const photoLandmarks = p.ai_tags?.landmarks || [];
+          const photoAuthorship = p.ai_tags?.authorship || null;
+          const authorName = p.author_name || photoAuthorship?.author_name || null;
+          const authorEmail = p.author_email || photoAuthorship?.author_email || null;
+          const cameraModel = p.camera_model || photoAuthorship?.camera_model || null;
 
           try {
             const info = await FileSystem.getInfoAsync(localUri);
@@ -87,6 +95,10 @@ export default function PhotosTab({ tripId, cityName, country }: Props) {
                 lat: p.lat,
                 lng: p.lng,
                 takenAt: p.taken_at,
+                authorName,
+                authorEmail,
+                cameraModel,
+                authorship: photoAuthorship,
                 tags: photoTags,
                 landmarks: photoLandmarks,
               };
@@ -112,6 +124,10 @@ export default function PhotosTab({ tripId, cityName, country }: Props) {
               lat: p.lat,
               lng: p.lng,
               takenAt: p.taken_at,
+              authorName,
+              authorEmail,
+              cameraModel,
+              authorship: photoAuthorship,
               tags: photoTags,
               landmarks: photoLandmarks,
             };
@@ -124,6 +140,10 @@ export default function PhotosTab({ tripId, cityName, country }: Props) {
               lat: p.lat,
               lng: p.lng,
               takenAt: p.taken_at,
+              authorName,
+              authorEmail,
+              cameraModel,
+              authorship: photoAuthorship,
               tags: photoTags,
               landmarks: photoLandmarks,
             };
@@ -145,6 +165,7 @@ export default function PhotosTab({ tripId, cityName, country }: Props) {
       country: country || undefined,
       onPhotoUploaded: (newPhoto, current, total) => {
         const localCachedUri = `${FileSystem.cacheDirectory}td-${newPhoto.id}.jpg`;
+        const authorship = newPhoto.ai_tags?.authorship || null;
         setPhotos((prev) => {
           if (prev.some((p) => p.id === newPhoto.id)) return prev;
           return [
@@ -156,6 +177,10 @@ export default function PhotosTab({ tripId, cityName, country }: Props) {
               lat: newPhoto.lat,
               lng: newPhoto.lng,
               takenAt: newPhoto.taken_at,
+              authorName: newPhoto.author_name || authorship?.author_name || null,
+              authorEmail: newPhoto.author_email || authorship?.author_email || null,
+              cameraModel: newPhoto.camera_model || authorship?.camera_model || null,
+              authorship,
               tags: newPhoto.ai_tags?.tags || [],
               landmarks: newPhoto.ai_tags?.landmarks || [],
             },
@@ -166,6 +191,18 @@ export default function PhotosTab({ tripId, cityName, country }: Props) {
     });
 
     if (uploadedBatch && uploadedBatch.length > 0) {
+      fetchPhotos();
+    }
+  };
+
+  const handleSingleUpload = async () => {
+    const singlePhoto = await pickAndUploadSingle({
+      autoTag: true,
+      cityName,
+      country: country || undefined,
+    });
+
+    if (singlePhoto) {
       fetchPhotos();
     }
   };
@@ -225,10 +262,12 @@ export default function PhotosTab({ tripId, cityName, country }: Props) {
             landmarks: updatedLandmarks,
             restaurants: [],
             tags: updatedTags,
+            authorship: selectedPhoto.authorship || undefined,
             exif: {
               lat: selectedPhoto.lat,
               lng: selectedPhoto.lng,
               taken_at: selectedPhoto.takenAt,
+              camera_model: selectedPhoto.cameraModel,
             },
           },
         })
@@ -395,25 +434,36 @@ export default function PhotosTab({ tripId, cityName, country }: Props) {
         />
       )}
 
-      {/* Bottom Upload Dock */}
+      {/* Bottom Upload Dock with Single & Batch Upload Options */}
       <View style={styles.bottomDock}>
-        <TouchableOpacity
-          style={[styles.addButton, uploading && styles.addButtonDisabled]}
-          onPress={handleBatchUpload}
-          disabled={uploading}
-          activeOpacity={0.85}
-        >
-          {uploading ? (
-            <View style={styles.uploadingRow}>
-              <ActivityIndicator color="#fff" />
-              <Text style={[styles.addButtonText, { marginLeft: 10 }]}>
-                Uploading & Tagging ({progress.percentage}%)...
-              </Text>
-            </View>
-          ) : (
-            <Text style={styles.addButtonText}>+ Add Photos (Auto-Tag)</Text>
-          )}
-        </TouchableOpacity>
+        <View style={styles.dockButtonsRow}>
+          <TouchableOpacity
+            style={[styles.singleAddButton, uploading && styles.addButtonDisabled]}
+            onPress={handleSingleUpload}
+            disabled={uploading}
+            activeOpacity={0.85}
+          >
+            <Text style={styles.singleAddButtonText}>📷 Single</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.addButton, uploading && styles.addButtonDisabled, { flex: 1, marginLeft: 10 }]}
+            onPress={handleBatchUpload}
+            disabled={uploading}
+            activeOpacity={0.85}
+          >
+            {uploading ? (
+              <View style={styles.uploadingRow}>
+                <ActivityIndicator color="#fff" size="small" />
+                <Text style={[styles.addButtonText, { marginLeft: 8 }]}>
+                  Uploading ({progress.percentage}%)...
+                </Text>
+              </View>
+            ) : (
+              <Text style={styles.addButtonText}>+ Batch Upload</Text>
+            )}
+          </TouchableOpacity>
+        </View>
       </View>
 
       {/* Full-Screen Photo Details & Tag Editor Modal */}
@@ -524,6 +574,43 @@ export default function PhotosTab({ tripId, cityName, country }: Props) {
                         >
                           <Text style={styles.editPillText}>✎ Edit Tags</Text>
                         </TouchableOpacity>
+                      </View>
+
+                      {/* Authorship & Photographer Verification Card */}
+                      <View style={styles.authorshipCard}>
+                        <View style={styles.authorshipHeader}>
+                          <View style={styles.avatarCircle}>
+                            <Text style={styles.avatarInitial}>
+                              {(selectedPhoto.authorName || 'U').charAt(0).toUpperCase()}
+                            </Text>
+                          </View>
+                          <View style={{ flex: 1, marginLeft: 10 }}>
+                            <View style={styles.authorRow}>
+                              <Text style={styles.authorshipAuthorName} numberOfLines={1}>
+                                {selectedPhoto.authorName || 'Original Photographer'}
+                              </Text>
+                              <View style={styles.verifiedBadge}>
+                                <Text style={styles.verifiedBadgeText}>✓ Verified</Text>
+                              </View>
+                            </View>
+                            {selectedPhoto.authorEmail ? (
+                              <Text style={styles.authorshipAuthorEmail} numberOfLines={1}>
+                                {selectedPhoto.authorEmail}
+                              </Text>
+                            ) : null}
+                          </View>
+                        </View>
+
+                        {(selectedPhoto.cameraModel || selectedPhoto.authorship?.camera_make) ? (
+                          <View style={styles.deviceRow}>
+                            <Text style={styles.deviceIcon}>📷</Text>
+                            <Text style={styles.deviceText} numberOfLines={1}>
+                              Shot on {selectedPhoto.authorship?.camera_make ? `${selectedPhoto.authorship.camera_make} ` : ''}
+                              {selectedPhoto.cameraModel || selectedPhoto.authorship?.camera_model}
+                              {selectedPhoto.authorship?.device_platform ? ` (${selectedPhoto.authorship.device_platform.toUpperCase()})` : ''}
+                            </Text>
+                          </View>
+                        ) : null}
                       </View>
 
                       {/* Top Landmarks */}
@@ -883,4 +970,95 @@ const styles = StyleSheet.create({
     marginBottom: 14,
   },
   noTagsText: { fontSize: 12, color: '#9CA3AF', fontStyle: 'italic' },
+
+  // Authorship and Dock Styles
+  dockButtonsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  singleAddButton: {
+    backgroundColor: '#F3F4F6',
+    borderWidth: 1,
+    borderColor: '#D1D5DB',
+    paddingVertical: 16,
+    paddingHorizontal: 16,
+    borderRadius: 30,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  singleAddButtonText: {
+    color: '#111827',
+    fontSize: 15,
+    fontWeight: '700',
+  },
+  authorshipCard: {
+    backgroundColor: '#F8FAFC',
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    padding: 14,
+    marginBottom: 16,
+  },
+  authorshipHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  avatarCircle: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: '#0F766E',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  avatarInitial: {
+    color: '#fff',
+    fontSize: 15,
+    fontWeight: 'bold',
+  },
+  authorRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  authorshipAuthorName: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#0F172A',
+    flexShrink: 1,
+  },
+  authorshipAuthorEmail: {
+    fontSize: 11,
+    color: '#64748B',
+    marginTop: 2,
+  },
+  verifiedBadge: {
+    backgroundColor: '#CCFBF1',
+    paddingVertical: 2,
+    paddingHorizontal: 6,
+    borderRadius: 6,
+    marginLeft: 6,
+  },
+  verifiedBadgeText: {
+    color: '#0F766E',
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  deviceRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 10,
+    paddingTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: '#F1F5F9',
+  },
+  deviceIcon: {
+    fontSize: 13,
+    marginRight: 6,
+  },
+  deviceText: {
+    fontSize: 12,
+    color: '#475569',
+    fontWeight: '500',
+    flexShrink: 1,
+  },
 });
